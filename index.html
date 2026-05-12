@@ -205,7 +205,7 @@ body{
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v3</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v4</div>
 </div>
 
 <script>
@@ -220,37 +220,32 @@ const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
 (function(){
 'use strict';
 
-// Multiple cobalt instances as fallback (try in order)
-const COBALT_INSTANCES = [
-  'https://api.cobalt.tools/',
-  'https://cobalt-api.kwiatekmiki.com/',
-  'https://capi.oak.li/',
-  'https://co.ggtyler.dev/',
-  'https://cobalt.api.timelessnesses.me/',
-];
+// Cloudflare Worker proxy (handles CORS + tries multiple cobalt instances)
+const API_ENDPOINT = 'https://ytigdown.s0937854008.workers.dev/';
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 
 async function cobaltFetch(payload) {
-  let lastErr = '';
-  for (const base of COBALT_INSTANCES) {
-    try {
-      const resp = await fetch(base, {
-        method: 'POST',
-        headers: {'Content-Type':'application/json','Accept':'application/json'},
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(12000)
-      });
-      if (!resp.ok) { lastErr = 'HTTP '+resp.status; continue; }
-      const data = await resp.json();
-      if (data.status === 'error') {
-        // cobalt v10 error format
-        lastErr = data.error?.code || data.text || '伺服器拒絕此連結';
-        continue;
-      }
-      return data; // success
-    } catch(e) { lastErr = e.message; }
+  try {
+    const resp = await fetch(API_ENDPOINT, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','Accept':'application/json'},
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(20000)
+    });
+    if (!resp.ok) {
+      let detail = 'HTTP '+resp.status;
+      try { const j = await resp.json(); if(j.error?.code) detail = j.error.code; } catch {}
+      throw new Error(detail);
+    }
+    const data = await resp.json();
+    if (data.status === 'error') {
+      throw new Error(data.error?.code || data.text || '伺服器拒絕此連結');
+    }
+    return data;
+  } catch(e) {
+    if (e.name === 'TimeoutError') throw new Error('伺服器逾時');
+    throw e;
   }
-  throw new Error(lastErr || '所有伺服器均無回應');
 }
 
 // PWA: inline manifest
