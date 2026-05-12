@@ -206,7 +206,7 @@ body{
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v6</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v7</div>
 </div>
 
 <script>
@@ -262,10 +262,16 @@ async function cobaltFetch(payload) {
       body: JSON.stringify(payload),
     }, 20000);
     if (!resp.ok) {
-      let detail = 'HTTP '+resp.status;
-      try { const j = await resp.json(); if(j.error && j.error.code) detail = j.error.code; } catch(_) {}
-      throw new Error(detail);
+  let detail = 'HTTP '+resp.status;
+  try {
+    const j = await resp.json();
+    if(j.error && j.error.code){
+      detail = j.error.code;
+      if(j.error.detail) detail += ' (' + j.error.detail + ')';
     }
+  } catch(_) {}
+  throw new Error(detail);
+}
     const data = await resp.json();
     if (data.status === 'error') {
       throw new Error((data.error && data.error.code) || data.text || '伺服器拒絕此連結');
