@@ -35,21 +35,27 @@ async function tryCobalt(base, body, timeoutMs) {
 
 async function proxyStream(req, url) {
   const range = req.headers.get('Range');
+  const isGoogleVideo = /googlevideo\.com|youtube\.com|ytimg\.com/.test(url);
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Accept': '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Sec-Fetch-Dest': 'video',
-    'Sec-Fetch-Mode': 'no-cors',
-    'Sec-Fetch-Site': 'cross-site',
   };
-  try {
-    const parsed = new URL(url);
-    headers['Origin'] = parsed.origin;
-    headers['Referer'] = parsed.origin + '/';
-  } catch(_) {}
+  if (isGoogleVideo) {
+    headers['Origin'] = 'https://www.youtube.com';
+    headers['Referer'] = 'https://www.youtube.com/';
+  }
   if (range) headers['Range'] = range;
-  const upstream = await fetch(url, { headers, redirect: 'follow' });
+
+  let upstream = await fetch(url, { headers, redirect: 'follow' });
+
+  // Retry with minimal headers on 403
+  if (upstream.status === 403) {
+    const minHeaders = { 'User-Agent': headers['User-Agent'] };
+    if (range) minHeaders['Range'] = range;
+    upstream = await fetch(url, { headers: minHeaders, redirect: 'follow' });
+  }
+
   const h = new Headers();
   for (const [k, v] of upstream.headers) {
     const lk = k.toLowerCase();
@@ -97,12 +103,26 @@ export default {
       return new Response('{"error":"bad request"}', { status: 400, headers: { 'Content-Type': 'application/json', ...CORS } });
     }
 
-    const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 6000)));
+    const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 15000)));
 
-    const winner = results.find(r => {
+    // Prefer tunnel responses (URL goes through cobalt, avoids YouTube IP blocks)
+    const isValid = r => {
       if (!r.ok) return false;
-      try { const j = JSON.parse(r.text); return j.status !== 'error'; } catch { return false; }
-    });
+      try { return JSON.parse(r.text).status !== 'error'; } catch { return false; }
+    };
+    const isTunnel = r => {
+      try {
+        const j = JSON.parse(r.text);
+        if (j.status === 'tunnel') return true;
+        const base = r.base.replace(/\/$/, '');
+        if (j.url && j.url.startsWith(base)) return true;
+        // Not a direct YouTube/Google CDN URL = likely safe
+        if (j.url && !/googlevideo\.com|youtube\.com/.test(j.url)) return true;
+        return false;
+      } catch { return false; }
+    };
+    const winner = results.find(r => isValid(r) && isTunnel(r))
+      || results.find(r => isValid(r));
     if (winner) {
       return new Response(winner.text, { headers: { 'Content-Type': 'application/json', ...CORS } });
     }

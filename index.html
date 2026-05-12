@@ -209,7 +209,7 @@ textarea,input{-webkit-user-select:text;user-select:text}
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v11</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v13</div>
 </div>
 
 <script>
@@ -261,7 +261,7 @@ async function cobaltFetch(payload) {
       method: 'POST',
       headers: {'Content-Type':'application/json','Accept':'application/json'},
       body: JSON.stringify(payload),
-    }, 20000);
+    }, 35000);
     if (!resp.ok) {
       let detail = 'HTTP '+resp.status;
       try {
@@ -359,7 +359,7 @@ async function go(){
   reset();
   state.url=url;
   $('loading').classList.remove('hidden');
-  $('loadTxt').textContent='正在取得影片資訊…';
+  $('loadTxt').textContent='正在取得影片資訊（YouTube 可能需 10-15 秒）…';
   $('btnFetch').disabled=true;
   try{
     const data = await cobaltFetch({url, videoQuality:'1080'});
@@ -449,16 +449,15 @@ function showPicker(items){
 
 async function download(){
   if(state.isPicker) return;
-  if(!state.cobaltUrl){
-    $('loadTxt').textContent='取得下載連結…';
-    $('loading').classList.remove('hidden');
-    try{
-      const data = await cobaltFetch({url:state.url, videoQuality:state.quality});
-      $('loading').classList.add('hidden');
-      if(!data.url){showErr('下載連結取得失敗');return;}
-      state.cobaltUrl=data.url;
-    }catch(e){$('loading').classList.add('hidden');showErr('下載失敗：'+e.message);return;}
-  }
+  // Always re-fetch to get a fresh URL (tunnel URLs expire quickly)
+  $('loadTxt').textContent='取得下載連結…';
+  $('loading').classList.remove('hidden');
+  try{
+    const data = await cobaltFetch({url:state.url, videoQuality:state.quality});
+    $('loading').classList.add('hidden');
+    if(!data.url){showErr('下載連結取得失敗');return;}
+    state.cobaltUrl=data.url;
+  }catch(e){$('loading').classList.add('hidden');showErr('下載失敗：'+e.message);return;}
   isIOS ? loadVideoForIOS(state.cobaltUrl) : triggerDownload(state.cobaltUrl);
 }
 
@@ -469,10 +468,21 @@ async function shareVideoFile(url){
   $('progLbl').textContent='下載影片中…';
   $('btnDl').disabled=true;
   try{
-    const proxied = proxify(url);
-    let r = await fetch(proxied);
-    if(!r.ok && r.status===403){
-      r = await fetch(url, {mode:'cors'}).catch(()=>r);
+    // For cobalt tunnel URLs: fetch directly from browser (has CORS)
+    // For CDN URLs (googlevideo etc): use our proxy
+    const isCobaltTunnel = !/googlevideo\.com|youtube\.com|ytimg\.com|instagram\.com|cdninstagram\.com|fbcdn\.net/.test(url);
+    let r;
+    if(isCobaltTunnel){
+      // Direct fetch from cobalt tunnel — no proxy needed
+      try{
+        r = await fetch(url);
+        if(!r.ok) throw new Error('direct:'+r.status);
+      }catch(directErr){
+        // Fallback to proxy if direct fails (CORS issue etc)
+        r = await fetch(proxify(url));
+      }
+    } else {
+      r = await fetch(proxify(url));
     }
     if(!r.ok) throw new Error('HTTP '+r.status);
     const total = +(r.headers.get('Content-Length')||0);
