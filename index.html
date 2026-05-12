@@ -209,7 +209,7 @@ textarea,input{-webkit-user-select:text;user-select:text}
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v9</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v11</div>
 </div>
 
 <script>
@@ -385,6 +385,15 @@ function showCard(url){
   $('dur').classList.add('hidden');
   $('ttl').textContent=isYT?'YouTube 影片':'Instagram 影片';
   $('upl').textContent='';
+  if(isYT){
+    const m=url.match(/(?:v=|youtu\.be\/)([\w-]{11})/);
+    if(m){
+      const img=$('thumb');
+      img.src='https://i.ytimg.com/vi/'+m[1]+'/hqdefault.jpg';
+      img.style.display='block';
+      img.onerror=()=>{img.style.display='none';};
+    }
+  }
   const qualities=isYT
     ?[['max','最高畫質'],['1080','1080p'],['720','720p'],['480','480p'],['360','360p']]
     :[['max','最高畫質']];
@@ -461,7 +470,10 @@ async function shareVideoFile(url){
   $('btnDl').disabled=true;
   try{
     const proxied = proxify(url);
-    const r = await fetch(proxied);
+    let r = await fetch(proxied);
+    if(!r.ok && r.status===403){
+      r = await fetch(url, {mode:'cors'}).catch(()=>r);
+    }
     if(!r.ok) throw new Error('HTTP '+r.status);
     const total = +(r.headers.get('Content-Length')||0);
     const reader = r.body.getReader();
