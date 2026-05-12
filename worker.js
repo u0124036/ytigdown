@@ -1,3 +1,5 @@
+import { connect } from 'cloudflare:sockets';
+
 const COBALT = [
   'https://cobalt-api.kwiatekmiki.com/',
   'https://capi.oak.li/',
@@ -42,6 +44,82 @@ async function getCobaltUrl(body) {
   const winner = results.find(r => isValid(r));
   if (!winner) return null;
   try { return JSON.parse(winner.text); } catch { return null; }
+}
+
+/* ── TCP-based tunnel fetch (may share egress IP with fetch) ── */
+
+async function fetchViaTcp(tunnelUrl) {
+  const parsed = new URL(tunnelUrl);
+  const host = parsed.hostname;
+  const port = parseInt(parsed.port || '80');
+  const path = parsed.pathname + parsed.search;
+
+  const socket = connect({ hostname: host, port });
+  const writer = socket.writable.getWriter();
+  const reqLine = `GET ${path} HTTP/1.1\r\nHost: ${host}:${port}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
+  await writer.write(new TextEncoder().encode(reqLine));
+  writer.releaseLock();
+
+  // Read the response: parse status line + headers, then stream body
+  const reader = socket.readable.getReader();
+  let headerBuf = new Uint8Array(0);
+  let headerEnd = -1;
+  let statusCode = 0;
+  const respHeaders = {};
+
+  // Read until we find \r\n\r\n
+  while (headerEnd === -1) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const merged = new Uint8Array(headerBuf.length + value.length);
+    merged.set(headerBuf);
+    merged.set(value, headerBuf.length);
+    headerBuf = merged;
+    const text = new TextDecoder().decode(headerBuf);
+    headerEnd = text.indexOf('\r\n\r\n');
+  }
+
+  if (headerEnd === -1) throw new Error('tcp_no_headers');
+
+  const headerText = new TextDecoder().decode(headerBuf.slice(0, headerEnd));
+  const lines = headerText.split('\r\n');
+  const statusMatch = lines[0].match(/HTTP\/\d\.\d (\d+)/);
+  statusCode = statusMatch ? parseInt(statusMatch[1]) : 0;
+
+  for (let i = 1; i < lines.length; i++) {
+    const idx = lines[i].indexOf(':');
+    if (idx > 0) {
+      respHeaders[lines[i].substring(0, idx).trim().toLowerCase()] =
+        lines[i].substring(idx + 1).trim();
+    }
+  }
+
+  // leftover body data after headers
+  const bodyStart = headerEnd + 4;
+  const leftover = headerBuf.slice(bodyStart);
+
+  reader.releaseLock();
+
+  // Create a readable stream for the body
+  const bodyStream = new ReadableStream({
+    start(controller) {
+      if (leftover.length > 0) controller.enqueue(leftover);
+    },
+    async pull(controller) {
+      const r = socket.readable.getReader();
+      try {
+        const { done, value } = await r.read();
+        r.releaseLock();
+        if (done) { controller.close(); return; }
+        controller.enqueue(value);
+      } catch (e) {
+        r.releaseLock();
+        controller.close();
+      }
+    },
+  });
+
+  return { status: statusCode, headers: respHeaders, body: bodyStream };
 }
 
 /* ── proxy: fetch upstream and stream back with CORS ── */
@@ -107,9 +185,10 @@ export default {
     }
 
     /*
-     * /download — all-in-one: ask cobalt + immediately stream the result
-     * This ensures the cobalt request and the tunnel fetch use the SAME Worker IP.
-     * Tunnel URLs are IP-bound, so splitting into 2 requests would fail.
+     * /download — all-in-one: ask cobalt + immediately stream the result.
+     * Tunnel URLs are IP-bound. We try each cobalt instance sequentially,
+     * immediately test the tunnel, and retry with the next instance on 403.
+     * We also retry the same URL up to 3 times (Worker may get a matching IP).
      */
     if (u.pathname === '/download') {
       let body;
@@ -118,37 +197,73 @@ export default {
           status: 400, headers: { 'Content-Type': 'application/json', ...CORS },
         });
       }
-      const data = await getCobaltUrl(body);
-      if (!data || !data.url) {
-        return new Response(JSON.stringify({
-          status: 'error', error: { code: 'no_url', detail: 'cobalt returned no download URL' },
-        }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS } });
-      }
-      try {
-        // Stream the video directly back — same IP as the cobalt request
-        const range = req.headers.get('Range');
-        const headers = {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          'Accept': '*/*',
-        };
-        if (range) headers['Range'] = range;
-        const upstream = await fetch(data.url, { headers, redirect: 'follow' });
-        if (!upstream.ok && upstream.status !== 206) {
-          return new Response(JSON.stringify({
-            status: 'error', error: { code: 'tunnel_' + upstream.status },
-          }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS } });
+
+      const range = req.headers.get('Range');
+      const fetchHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+      };
+      if (range) fetchHeaders['Range'] = range;
+
+      // Shuffle cobalt list for load distribution
+      const shuffled = [...COBALT].sort(() => Math.random() - 0.5);
+      const errors = [];
+
+      for (const base of shuffled) {
+        const cobaltResult = await tryCobalt(base, body, 12000);
+        if (!cobaltResult.ok) { errors.push(base + ':cobalt_fail'); continue; }
+        let data;
+        try { data = JSON.parse(cobaltResult.text); } catch { continue; }
+        if (data.status === 'error' || !data.url) { errors.push(base + ':no_url'); continue; }
+
+        // Try fetching the tunnel URL: first via fetch(), then via TCP socket
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            if (attempt === 0) {
+              // Try normal fetch first
+              const upstream = await fetch(data.url, { headers: fetchHeaders, redirect: 'follow' });
+              if (upstream.ok || upstream.status === 206) {
+                const h = buildStreamHeaders(upstream);
+                if (data.filename) {
+                  h.set('Content-Disposition', 'attachment; filename="' + data.filename.replace(/"/g, '') + '"');
+                }
+                return new Response(upstream.body, { status: upstream.status, headers: h });
+              }
+              if (upstream.status === 403) {
+                errors.push(base + ':fetch_403');
+                continue; // try TCP next
+              }
+              errors.push(base + ':fetch_' + upstream.status);
+              break;
+            } else {
+              // Try TCP socket connection (might share egress IP with cobalt fetch)
+              const tcpResp = await fetchViaTcp(data.url);
+              if (tcpResp.status === 200 || tcpResp.status === 206) {
+                const h = new Headers();
+                if (tcpResp.headers['content-type']) h.set('Content-Type', tcpResp.headers['content-type']);
+                else h.set('Content-Type', 'video/mp4');
+                if (tcpResp.headers['content-length']) h.set('Content-Length', tcpResp.headers['content-length']);
+                if (data.filename) {
+                  h.set('Content-Disposition', 'attachment; filename="' + data.filename.replace(/"/g, '') + '"');
+                } else {
+                  h.set('Content-Disposition', 'attachment; filename="video.mp4"');
+                }
+                for (const [k, v] of Object.entries(CORS)) h.set(k, v);
+                return new Response(tcpResp.body, { status: tcpResp.status, headers: h });
+              }
+              errors.push(base + ':tcp_' + tcpResp.status);
+            }
+          } catch (e) {
+            errors.push(base + ':' + (attempt === 0 ? 'fetch_err:' : 'tcp_err:') + e.message);
+            if (attempt === 0) continue; // try TCP
+          }
         }
-        const h = buildStreamHeaders(upstream);
-        // Use filename from cobalt if available
-        if (data.filename) {
-          h.set('Content-Disposition', 'attachment; filename="' + data.filename.replace(/"/g, '') + '"');
-        }
-        return new Response(upstream.body, { status: upstream.status, headers: h });
-      } catch (e) {
-        return new Response(JSON.stringify({ error: 'download_failed', detail: e.message }), {
-          status: 502, headers: { 'Content-Type': 'application/json', ...CORS },
-        });
       }
+
+      return new Response(JSON.stringify({
+        status: 'error',
+        error: { code: 'all_failed', detail: errors.join(' | ') },
+      }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS } });
     }
 
     /* GET / — health check */
