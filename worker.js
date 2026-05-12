@@ -1,9 +1,13 @@
 const COBALT = [
+  'https://co.ggtyler.dev/',
+  'https://dwnld.nichind.dev/',
   'https://cobalt-api.kwiatekmiki.com/',
   'https://capi.oak.li/',
-  'https://co.ggtyler.dev/',
   'https://cobalt.synzr.space/',
-  'https://dwnld.nichind.dev/',
+  'https://cobalt-backend.canine.tools/',
+  'https://cobalt-api.ayo.tf/',
+  'https://c-api.lol/',
+  'https://cobalt.bigowl.cc/',
   'https://api.cobalt.tools/',
 ];
 
@@ -85,12 +89,31 @@ export default {
       return new Response('{"error":"bad request"}', { status: 400, headers: { 'Content-Type': 'application/json', ...CORS } });
     }
 
-    const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 6000)));
+    let results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 12000)));
 
-    const winner = results.find(r => {
+    let winner = results.find(r => {
       if (!r.ok) return false;
       try { const j = JSON.parse(r.text); return j.status !== 'error'; } catch { return false; }
     });
+
+    if (!winner) {
+      const transient = results.filter(r =>
+        r.error || r.status === 0 || r.status === 526 || r.status === 530 ||
+        r.status === 502 || r.status === 503 || r.status === 504
+      );
+      if (transient.length) {
+        await new Promise(res => setTimeout(res, 1500));
+        const retryBases = transient.map(r => r.base);
+        const retried = await Promise.all(retryBases.map(base => tryCobalt(base, body, 12000)));
+        const byBase = new Map(retried.map(r => [r.base, r]));
+        results = results.map(r => byBase.get(r.base) || r);
+        winner = results.find(r => {
+          if (!r.ok) return false;
+          try { const j = JSON.parse(r.text); return j.status !== 'error'; } catch { return false; }
+        });
+      }
+    }
+
     if (winner) {
       return new Response(winner.text, { headers: { 'Content-Type': 'application/json', ...CORS } });
     }
