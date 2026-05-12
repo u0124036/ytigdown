@@ -207,10 +207,10 @@ textarea,input{-webkit-user-select:text;user-select:text}
     <button class="btn-dl" id="btnDl">⬇️ 下載影片</button>
 
     <div class="tip">
-      <div class="tip-t">📱 儲存到 iOS 相簿（兩種方式）</div>
+      <div class="tip-t">📱 儲存到 iOS 相簿</div>
       <ol>
-        <li>點 <strong>下載影片</strong>，播放器出現後<strong>長按畫面</strong> → <strong>儲存影片</strong></li>
-        <li>或點藍色 <strong>在 Safari 開啟</strong> 按鈕，進去後點底部 <strong>分享 ↑</strong> → <strong>儲存影片</strong></li>
+        <li>點 <strong>下載影片</strong>，等待下載完成後會自動彈出 <strong>分享單</strong> → 選 <strong>儲存影片</strong></li>
+        <li>若沒彈出，使用 <strong>在 Safari 開啟</strong> 按鈕，到頁面後點 <strong>分享 ↑</strong> → <strong>儲存影片</strong></li>
       </ol>
     </div>
   </div>
@@ -230,7 +230,9 @@ const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
 'use strict';
 
 const API_ENDPOINT = 'https://video-api.s0937854008.workers.dev/';
+const PROXY_ENDPOINT = 'https://video-api.s0937854008.workers.dev/proxy?u=';
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+const proxify = u => PROXY_ENDPOINT + encodeURIComponent(u);
 
 function fetchWithTimeout(url, opts, ms){
   const ctrl = new AbortController();
@@ -456,29 +458,69 @@ async function download(){
   isIOS ? loadVideoForIOS(state.cobaltUrl) : triggerDownload(state.cobaltUrl);
 }
 
-function loadVideoForIOS(url){
+async function shareVideoFile(url){
   $('ok').classList.add('hidden');
   $('prog').classList.remove('hidden');
-  $('pb').style.width='60%';
-  $('progLbl').textContent='載入影片中…';
+  $('pb').style.width='10%';
+  $('progLbl').textContent='下載影片中…';
   $('btnDl').disabled=true;
+  try{
+    const proxied = proxify(url);
+    const r = await fetch(proxied);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const total = +(r.headers.get('Content-Length')||0);
+    const reader = r.body.getReader();
+    const chunks=[]; let received=0;
+    while(true){
+      const {done,value}=await reader.read();
+      if(done) break;
+      chunks.push(value); received+=value.length;
+      if(total){
+        const pct = Math.min(95, Math.round(received/total*100));
+        $('pb').style.width = pct+'%';
+        $('progLbl').textContent = '下載中… '+pct+'%';
+      } else {
+        $('progLbl').textContent = '下載中… '+(received>>20)+' MB';
+      }
+    }
+    const blob = new Blob(chunks, {type:'video/mp4'});
+    const file = new File([blob], 'video.mp4', {type:'video/mp4'});
+    $('pb').style.width='100%';
+    $('prog').classList.add('hidden');
+    $('btnDl').disabled=false;
+
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      try{
+        await navigator.share({files:[file]});
+        $('ok').classList.remove('hidden');
+        $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
+        return;
+      }catch(e){
+        if(e && e.name==='AbortError') return;
+      }
+    }
+    fallbackPlayer(URL.createObjectURL(blob), url);
+  }catch(e){
+    $('prog').classList.add('hidden');
+    $('btnDl').disabled=false;
+    showErr('下載失敗：'+e.message+'　改用備用方式');
+    fallbackPlayer(url, url);
+  }
+}
+
+function fallbackPlayer(playUrl, origUrl){
   const v=$('vid');
-  v.src=url; v.load();
-  v.addEventListener('canplay',()=>{
-    $('prog').classList.add('hidden');
-    $('vp').classList.remove('hidden');
-    $('btnDl').disabled=false;
-    $('ok').classList.remove('hidden');
-    $('okTxt').textContent='長按影片畫面中央 → 「儲存影片」';
-    const s=$('btnSafari');
-    s.href=url;
-    s.classList.remove('hidden');
-  },{once:true});
-  v.addEventListener('error',()=>{
-    $('prog').classList.add('hidden');
-    $('btnDl').disabled=false;
-    window.location.href=url;
-  },{once:true});
+  v.src=playUrl; v.load();
+  $('vp').classList.remove('hidden');
+  $('ok').classList.remove('hidden');
+  $('okTxt').textContent='長按影片畫面中央 → 「儲存影片」（若無此選項請用下方按鈕）';
+  const s=$('btnSafari');
+  s.href=proxify(origUrl);
+  s.classList.remove('hidden');
+}
+
+function loadVideoForIOS(url){
+  shareVideoFile(url);
 }
 
 function triggerDownload(url){
