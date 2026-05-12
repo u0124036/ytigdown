@@ -7,12 +7,21 @@ const COBALT = [
   'https://api.cobalt.tools/',
 ];
 
+const PIPED = [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.adminforge.de',
+  'https://pipedapi.r4fo.com',
+  'https://api.piped.yt',
+];
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
   'Access-Control-Allow-Headers': 'Content-Type, Accept, Range',
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition',
 };
+
+/* ── cobalt (for Instagram etc.) ── */
 
 async function tryCobalt(base, body, timeoutMs) {
   const ctrl = new AbortController();
@@ -33,29 +42,72 @@ async function tryCobalt(base, body, timeoutMs) {
   }
 }
 
+/* ── Piped (for YouTube) ── */
+
+function extractYTId(url) {
+  const m = url.match(/(?:v=|youtu\.be\/|\/shorts\/)([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+async function tryPipedInstance(base, videoId, timeoutMs) {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(`${base}/streams/${videoId}`, { signal: ctrl.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const muxed = (data.videoStreams || [])
+      .filter(s => s.videoOnly === false)
+      .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
+    if (!muxed.length) throw new Error('no_muxed');
+    return {
+      streams: muxed,
+      meta: {
+        title: data.title || '',
+        uploader: data.uploader || '',
+        duration: data.duration || 0,
+        thumbnail: data.thumbnailUrl || '',
+      },
+    };
+  } catch (e) { throw e; }
+  finally { clearTimeout(tid); }
+}
+
+async function fetchYouTubePiped(videoId, quality) {
+  try {
+    const result = await Promise.any(
+      PIPED.map(b => tryPipedInstance(b, videoId, 12000))
+    );
+    let stream = result.streams[0];
+    if (quality && quality !== 'max') {
+      const qNum = parseInt(quality);
+      const match = result.streams.find(s => (parseInt(s.quality) || 0) <= qNum);
+      if (match) stream = match;
+    }
+    return {
+      status: 'tunnel',
+      url: stream.url,
+      title: result.meta.title,
+      uploader: result.meta.uploader,
+      duration: result.meta.duration,
+      thumbnail: result.meta.thumbnail,
+      quality: stream.quality,
+      availableQualities: result.streams.map(s => s.quality),
+    };
+  } catch { return null; }
+}
+
+/* ── proxy endpoint ── */
+
 async function proxyStream(req, url) {
   const range = req.headers.get('Range');
-  const isGoogleVideo = /googlevideo\.com|youtube\.com|ytimg\.com/.test(url);
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Accept': '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
   };
-  if (isGoogleVideo) {
-    headers['Origin'] = 'https://www.youtube.com';
-    headers['Referer'] = 'https://www.youtube.com/';
-  }
   if (range) headers['Range'] = range;
-
-  let upstream = await fetch(url, { headers, redirect: 'follow' });
-
-  // Retry with minimal headers on 403
-  if (upstream.status === 403) {
-    const minHeaders = { 'User-Agent': headers['User-Agent'] };
-    if (range) minHeaders['Range'] = range;
-    upstream = await fetch(url, { headers: minHeaders, redirect: 'follow' });
-  }
-
+  const upstream = await fetch(url, { headers, redirect: 'follow' });
   const h = new Headers();
   for (const [k, v] of upstream.headers) {
     const lk = k.toLowerCase();
@@ -70,6 +122,8 @@ async function proxyStream(req, url) {
   return new Response(upstream.body, { status: upstream.status, headers: h });
 }
 
+/* ── main handler ── */
+
 export default {
   async fetch(req) {
     if (req.method === 'OPTIONS') {
@@ -81,7 +135,9 @@ export default {
     if (u.pathname === '/proxy') {
       const target = u.searchParams.get('u');
       if (!target) {
-        return new Response('{"error":"missing u"}', { status: 400, headers: { 'Content-Type': 'application/json', ...CORS } });
+        return new Response('{"error":"missing u"}', {
+          status: 400, headers: { 'Content-Type': 'application/json', ...CORS },
+        });
       }
       try {
         return await proxyStream(req, decodeURIComponent(target));
@@ -93,19 +149,34 @@ export default {
     }
 
     if (req.method === 'GET') {
-      return new Response(JSON.stringify({ status: 'ok', instances: COBALT.length }), {
+      return new Response(JSON.stringify({ status: 'ok', cobalt: COBALT.length, piped: PIPED.length }), {
         headers: { 'Content-Type': 'application/json', ...CORS },
       });
     }
 
     let body;
     try { body = await req.json(); } catch {
-      return new Response('{"error":"bad request"}', { status: 400, headers: { 'Content-Type': 'application/json', ...CORS } });
+      return new Response('{"error":"bad request"}', {
+        status: 400, headers: { 'Content-Type': 'application/json', ...CORS },
+      });
     }
 
+    const isYT = /youtube\.com|youtu\.be/i.test(body.url || '');
+    const videoId = isYT ? extractYTId(body.url) : null;
+
+    /* ── YouTube: Piped first, cobalt fallback ── */
+    if (isYT && videoId) {
+      const piped = await fetchYouTubePiped(videoId, body.videoQuality);
+      if (piped) {
+        return new Response(JSON.stringify(piped), {
+          headers: { 'Content-Type': 'application/json', ...CORS },
+        });
+      }
+    }
+
+    /* ── cobalt (Instagram, or YouTube fallback) ── */
     const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 15000)));
 
-    // Prefer tunnel responses (URL goes through cobalt, avoids YouTube IP blocks)
     const isValid = r => {
       if (!r.ok) return false;
       try { return JSON.parse(r.text).status !== 'error'; } catch { return false; }
@@ -116,7 +187,6 @@ export default {
         if (j.status === 'tunnel') return true;
         const base = r.base.replace(/\/$/, '');
         if (j.url && j.url.startsWith(base)) return true;
-        // Not a direct YouTube/Google CDN URL = likely safe
         if (j.url && !/googlevideo\.com|youtube\.com/.test(j.url)) return true;
         return false;
       } catch { return false; }
@@ -124,20 +194,22 @@ export default {
     const winner = results.find(r => isValid(r) && isTunnel(r))
       || results.find(r => isValid(r));
     if (winner) {
-      return new Response(winner.text, { headers: { 'Content-Type': 'application/json', ...CORS } });
+      return new Response(winner.text, {
+        headers: { 'Content-Type': 'application/json', ...CORS },
+      });
     }
 
     const detail = results.map(r => {
-      const name = r.base.replace(/^https?:\/\//,'').replace(/\/$/,'');
+      const name = r.base.replace(/^https?:\/\//, '').replace(/\/$/, '');
       if (r.error) return `${name}=${r.error}`;
-      let code = 'HTTP'+r.status;
+      let code = 'HTTP' + r.status;
       try { const j = JSON.parse(r.text); if (j.error && j.error.code) code = j.error.code; } catch {}
       return `${name}=${code}`;
     }).join(' | ');
 
     return new Response(JSON.stringify({
       status: 'error',
-      error: { code: 'all_failed', detail },
+      error: { code: 'all_failed', detail: (isYT ? 'piped:all_failed | ' : '') + detail },
     }), {
       status: 502,
       headers: { 'Content-Type': 'application/json', ...CORS },
