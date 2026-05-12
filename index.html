@@ -205,7 +205,7 @@ body{
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v3</div>
 </div>
 
 <script>
@@ -220,11 +220,13 @@ const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
 (function(){
 'use strict';
 
-// Multiple cobalt instances as fallback
+// Multiple cobalt instances as fallback (try in order)
 const COBALT_INSTANCES = [
   'https://api.cobalt.tools/',
+  'https://cobalt-api.kwiatekmiki.com/',
+  'https://capi.oak.li/',
+  'https://co.ggtyler.dev/',
   'https://cobalt.api.timelessnesses.me/',
-  'https://cobalt.urdnot.pw/',
 ];
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 
@@ -268,19 +270,14 @@ const iconLink = document.createElement('link');
 iconLink.rel='apple-touch-icon'; iconLink.href=ICON_DATA_URL;
 document.head.appendChild(iconLink);
 
-// Service Worker inline
+// Unregister any old service worker and clear caches (was causing cache issues)
 if('serviceWorker' in navigator){
-  const swCode = `
-    const C='vd3-v1';
-    self.addEventListener('install',e=>{self.skipWaiting();});
-    self.addEventListener('activate',e=>{self.clients.claim();});
-    self.addEventListener('fetch',e=>{
-      if(e.request.url.includes('cobalt')||e.request.url.includes('api'))return;
-      e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request)));
-    });
-  `;
-  const swBlob = new Blob([swCode],{type:'application/javascript'});
-  navigator.serviceWorker.register(URL.createObjectURL(swBlob),{scope:'./'}).catch(()=>{});
+  navigator.serviceWorker.getRegistrations().then(regs=>{
+    regs.forEach(r=>r.unregister());
+  });
+  if('caches' in window){
+    caches.keys().then(ks=>ks.forEach(k=>caches.delete(k)));
+  }
 }
 
 // iOS install banner
@@ -306,7 +303,25 @@ function reset(){
   state={url:'',cobaltUrl:'',quality:'max',isPicker:false};
 }
 
-function showErr(msg){ $('err').textContent=msg; $('err').classList.remove('hidden'); $('loading').classList.add('hidden'); }
+function showErr(msg){
+  $('err').innerHTML = '';
+  const p = document.createElement('div');
+  p.textContent = msg;
+  $('err').appendChild(p);
+  // Fallback link to saveclip if URL was given
+  if(state.url){
+    const a = document.createElement('a');
+    const target = /instagram\.com/i.test(state.url)
+      ? 'https://saveclip.app/en?url=' + encodeURIComponent(state.url)
+      : 'https://en1.savefrom.net/1-youtube-video-downloader/#url=' + encodeURIComponent(state.url);
+    a.href = target; a.target = '_blank'; a.rel = 'noopener';
+    a.style.cssText = 'display:inline-block;margin-top:10px;color:#5ac8fa;font-size:13px;text-decoration:underline';
+    a.textContent = '👉 改用 saveclip / savefrom 開啟';
+    $('err').appendChild(a);
+  }
+  $('err').classList.remove('hidden');
+  $('loading').classList.add('hidden');
+}
 
 async function go(){
   const url=$('url').value.trim();
