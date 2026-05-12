@@ -1,11 +1,15 @@
 import { connect } from 'cloudflare:sockets';
 
 const COBALT = [
+  'https://co.ggtyler.dev/',
+  'https://dwnld.nichind.dev/',
+  'https://cobalt-backend.canine.tools/',
+  'https://cobalt-api.ayo.tf/',
+  'https://c-api.lol/',
+  'https://cobalt.bigowl.cc/',
   'https://cobalt-api.kwiatekmiki.com/',
   'https://capi.oak.li/',
-  'https://co.ggtyler.dev/',
   'https://cobalt.synzr.space/',
-  'https://dwnld.nichind.dev/',
   'https://api.cobalt.tools/',
 ];
 
