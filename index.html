@@ -192,24 +192,19 @@ textarea,input{-webkit-user-select:text;user-select:text}
     <div id="vp" class="vp hidden">
       <video id="vid" controls playsinline preload="metadata"></video>
     </div>
-    <button id="btnShare2" class="btn-dl hidden" style="background:#0a84ff">📤 儲存影片到相簿</button>
+
+    <div id="saveActions" class="hidden" style="display:flex;gap:8px;margin-bottom:14px">
+      <button id="btnSavePhotos" class="btn-dl" style="flex:1;margin-bottom:0;background:#0a84ff">🖼️ 儲存到相簿</button>
+      <button id="btnSaveFiles" class="btn-dl" style="flex:1;margin-bottom:0;background:#30d158">📁 儲存到檔案</button>
+    </div>
 
     <div id="picker" class="picker-grid hidden"></div>
     <div id="ok" class="ok hidden">✓ <span id="okTxt"></span></div>
 
-    <button class="btn-dl" id="btnDl">⬇️ 下載影片</button>
-
-    <div class="tip">
-      <div class="tip-t">📱 儲存到 iOS 相簿</div>
-      <ol>
-        <li>點 <strong>下載影片</strong>，等待下載完成後會自動彈出 <strong>分享單</strong> → 選 <strong>儲存影片</strong></li>
-        <li>若分享單沒彈出，點 <strong>儲存影片到相簿</strong> 按鈕即可再次開啟</li>
-        <li>也可<strong>長按影片畫面</strong> → <strong>儲存影片</strong></li>
-      </ol>
-    </div>
+    <button class="btn-dl hidden" id="btnDl">⬇️ 下載影片</button>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v19</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v20</div>
 </div>
 
 <script>
@@ -324,12 +319,13 @@ $('btnClear').onclick = () => { $('url').value=''; reset(); };
 $('url').addEventListener('keydown', e => { if(e.key==='Enter'){e.preventDefault();go();} });
 $('btnFetch').onclick = go;
 $('btnDl').onclick = download;
-$('btnShare2').onclick = reshare;
+$('btnSavePhotos').onclick = () => saveToPhotos();
+$('btnSaveFiles').onclick = () => saveToFiles();
 
 function reset(){
-  ['result','err','prog','vp','ok','picker','btnShare2'].forEach(id=>$(id).classList.add('hidden'));
+  ['result','err','prog','vp','ok','picker','saveActions'].forEach(id=>$(id).classList.add('hidden'));
   $('pb').style.width='0%';
-  state={url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null};
+  state={url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null,sharing:false,blobUrl:null};
 }
 
 function showErr(msg){
@@ -370,6 +366,8 @@ async function go(){
     if(data.url){
       state.cobaltUrl=data.url;
       showCard(url, data);
+      // Auto-start download
+      download();
     } else {
       showErr('取得影片失敗，請換一個連結試試');
     }
@@ -396,8 +394,8 @@ function showCard(url, data){
   if(isYT){
     const m=url.match(/(?:v=|youtu\.be\/)([\w-]{11})/);
     if(m){
-      const img=$('thumb');
-      img.src='https://i.ytimg.com/vi/'+m[1]+'/hqdefault.jpg';
+      const img=$('thumb');      img.crossOrigin='anonymous';
+      img.referrerPolicy='no-referrer';      img.src='https://i.ytimg.com/vi/'+m[1]+'/hqdefault.jpg';
       img.style.display='block';
       img.onerror=()=>{img.style.display='none';};
     }
@@ -477,9 +475,10 @@ async function download(){
 
 async function downloadYTForIOS(){
   $('ok').classList.add('hidden');
+  $('saveActions').classList.add('hidden');
   $('prog').classList.remove('hidden');
   $('pb').style.width='10%';
-  $('progLbl').textContent='下載影片中（合併取得+下載）…';
+  $('progLbl').textContent='下載影片中…';
   $('btnDl').disabled=true;
   try{
     const r = await fetchWithTimeout(DOWNLOAD_ENDPOINT, {
@@ -513,17 +512,9 @@ async function downloadYTForIOS(){
     $('prog').classList.add('hidden');
     $('btnDl').disabled=false;
     state.videoFile = file;
-    const blobUrl = URL.createObjectURL(blob);
-    if(navigator.canShare && navigator.canShare({files:[file]}) && !state.sharing){
-      try{
-        state.sharing=true;
-        await navigator.share({files:[file]});
-        $('ok').classList.remove('hidden');
-        $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
-        return;
-      }catch(e){ if(e && e.name==='AbortError') return; }finally{ state.sharing=false; }
-    }
-    showBlobFallback(blobUrl, file);
+    state.blobUrl = URL.createObjectURL(blob);
+    // Show video preview + save options
+    showDownloadComplete();
   }catch(e){
     $('prog').classList.add('hidden');
     $('btnDl').disabled=false;
@@ -545,12 +536,12 @@ function downloadYTDirect(){
 
 async function shareVideoFile(url){
   $('ok').classList.add('hidden');
+  $('saveActions').classList.add('hidden');
   $('prog').classList.remove('hidden');
   $('pb').style.width='10%';
   $('progLbl').textContent='下載影片中…';
   $('btnDl').disabled=true;
   try{
-    // All URLs from Worker are now HTTPS (tunnel URLs rewritten to our proxy)
     const r = await fetch(url);
     if(!r.ok) throw new Error('HTTP '+r.status);
     const total = +(r.headers.get('Content-Length')||0);
@@ -573,21 +564,9 @@ async function shareVideoFile(url){
     $('pb').style.width='100%';
     $('prog').classList.add('hidden');
     $('btnDl').disabled=false;
-
     state.videoFile = file;
-    const blobUrl = URL.createObjectURL(blob);
-    if(navigator.canShare && navigator.canShare({files:[file]}) && !state.sharing){
-      try{
-        state.sharing=true;
-        await navigator.share({files:[file]});
-        $('ok').classList.remove('hidden');
-        $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
-        return;
-      }catch(e){
-        if(e && e.name==='AbortError') return;
-      }finally{ state.sharing=false; }
-    }
-    showBlobFallback(blobUrl, file);
+    state.blobUrl = URL.createObjectURL(blob);
+    showDownloadComplete();
   }catch(e){
     $('prog').classList.add('hidden');
     $('btnDl').disabled=false;
@@ -595,30 +574,43 @@ async function shareVideoFile(url){
   }
 }
 
-function showBlobFallback(blobUrl, file){
+function showDownloadComplete(){
   const v=$('vid');
-  v.src=blobUrl; v.load();
+  v.src=state.blobUrl; v.load();
   $('vp').classList.remove('hidden');
   $('ok').classList.remove('hidden');
-  $('okTxt').textContent='長按影片 →「儲存影片」，或點下方按鈕';
+  $('okTxt').textContent='下載完成！選擇儲存方式';
+  $('saveActions').classList.remove('hidden');
+  $('saveActions').style.display='flex';
+}
+
+async function saveToPhotos(){
+  const file = state.videoFile;
+  if(!file){ showErr('請先等待下載完成'); return; }
+  if(state.sharing) return;
   if(navigator.canShare && navigator.canShare({files:[file]})){
-    $('btnShare2').classList.remove('hidden');
+    try{
+      state.sharing=true;
+      await navigator.share({files:[file]});
+      $('ok').classList.remove('hidden');
+      $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
+    }catch(e){
+      if(e && e.name==='AbortError') return;
+      showErr('分享失敗：'+e.message);
+    }finally{ state.sharing=false; }
+  } else {
+    showErr('此裝置不支援分享功能，請使用「儲存到檔案」');
   }
 }
 
-async function reshare(){
-  const file = state.videoFile;
-  if(!file){ showErr('請先點擊下載影片'); return; }
-  if(state.sharing) return;
-  try{
-    state.sharing=true;
-    await navigator.share({files:[file]});
-    $('ok').classList.remove('hidden');
-    $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
-  }catch(e){
-    if(e && e.name==='AbortError') return;
-    showErr('分享失敗：'+e.message);
-  }finally{ state.sharing=false; }
+function saveToFiles(){
+  if(!state.blobUrl){ showErr('請先等待下載完成'); return; }
+  const a=document.createElement('a');
+  a.href=state.blobUrl; a.download='video.mp4';
+  a.style.display='none';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  $('ok').classList.remove('hidden');
+  $('okTxt').textContent='已開始儲存到檔案';
 }
 
 function loadVideoForIOS(url){
