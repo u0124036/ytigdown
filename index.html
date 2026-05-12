@@ -220,8 +220,36 @@ const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
 (function(){
 'use strict';
 
-const COBALT = 'https://api.cobalt.tools/';
+// Multiple cobalt instances as fallback
+const COBALT_INSTANCES = [
+  'https://api.cobalt.tools/',
+  'https://cobalt.api.timelessnesses.me/',
+  'https://cobalt.urdnot.pw/',
+];
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+async function cobaltFetch(payload) {
+  let lastErr = '';
+  for (const base of COBALT_INSTANCES) {
+    try {
+      const resp = await fetch(base, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json','Accept':'application/json'},
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(12000)
+      });
+      if (!resp.ok) { lastErr = 'HTTP '+resp.status; continue; }
+      const data = await resp.json();
+      if (data.status === 'error') {
+        // cobalt v10 error format
+        lastErr = data.error?.code || data.text || '伺服器拒絕此連結';
+        continue;
+      }
+      return data; // success
+    } catch(e) { lastErr = e.message; }
+  }
+  throw new Error(lastErr || '所有伺服器均無回應');
+}
 
 // PWA: inline manifest
 const manifest = {
@@ -292,22 +320,21 @@ async function go(){
   $('loadTxt').textContent='正在取得影片資訊…';
   $('btnFetch').disabled=true;
   try{
-    const resp=await fetch(COBALT,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Accept':'application/json'},
-      body:JSON.stringify({url,videoQuality:'1080'})
-    });
-    const data=await resp.json();
+    const data = await cobaltFetch({url, videoQuality:'1080'});
     $('loading').classList.add('hidden');
     $('btnFetch').disabled=false;
-    if(data.status==='error'){ showErr('無法取得影片：'+(data.text||'請確認連結是否正確')); return; }
     if(data.status==='picker'){ showPicker(data.picker||[]); return; }
-    state.cobaltUrl=data.url;
-    showCard(url);
+    // handle stream / redirect / tunnel (cobalt v10 uses "tunnel")
+    if(data.url){
+      state.cobaltUrl=data.url;
+      showCard(url);
+    } else {
+      showErr('取得影片失敗，請換一個連結試試');
+    }
   }catch(e){
     $('loading').classList.add('hidden');
     $('btnFetch').disabled=false;
-    showErr('網路錯誤，請稍後再試');
+    showErr('無法取得影片：'+e.message);
   }
 }
 
@@ -340,12 +367,7 @@ async function refetch(quality){
   $('loadTxt').textContent='切換畫質…';
   $('loading').classList.remove('hidden');
   try{
-    const resp=await fetch(COBALT,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Accept':'application/json'},
-      body:JSON.stringify({url:state.url,videoQuality:quality})
-    });
-    const data=await resp.json();
+    const data = await cobaltFetch({url:state.url, videoQuality:quality});
     $('loading').classList.add('hidden');
     if(data.url) state.cobaltUrl=data.url;
   }catch{ $('loading').classList.add('hidden'); }
@@ -381,16 +403,11 @@ async function download(){
     $('loadTxt').textContent='取得下載連結…';
     $('loading').classList.remove('hidden');
     try{
-      const resp=await fetch(COBALT,{
-        method:'POST',
-        headers:{'Content-Type':'application/json','Accept':'application/json'},
-        body:JSON.stringify({url:state.url,videoQuality:state.quality})
-      });
-      const data=await resp.json();
+      const data = await cobaltFetch({url:state.url, videoQuality:state.quality});
       $('loading').classList.add('hidden');
       if(!data.url){showErr('下載連結取得失敗');return;}
       state.cobaltUrl=data.url;
-    }catch(e){$('loading').classList.add('hidden');showErr('下載失敗');return;}
+    }catch(e){$('loading').classList.add('hidden');showErr('下載失敗：'+e.message);return;}
   }
   isIOS ? loadVideoForIOS(state.cobaltUrl) : triggerDownload(state.cobaltUrl);
 }
