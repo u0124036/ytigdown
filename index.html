@@ -209,7 +209,7 @@ textarea,input{-webkit-user-select:text;user-select:text}
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v17</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v18</div>
 </div>
 
 <script>
@@ -314,7 +314,7 @@ if(isIOS && window.navigator.standalone !== true){
 }
 
 const $ = id => document.getElementById(id);
-let state = {url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null};
+let state = {url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null,sharing:false};
 
 $('btnPaste').onclick = async () => {
   try { const t=await navigator.clipboard.readText(); if(t)$('url').value=t.trim(); }
@@ -514,13 +514,14 @@ async function downloadYTForIOS(){
     $('btnDl').disabled=false;
     state.videoFile = file;
     const blobUrl = URL.createObjectURL(blob);
-    if(navigator.canShare && navigator.canShare({files:[file]})){
+    if(navigator.canShare && navigator.canShare({files:[file]}) && !state.sharing){
       try{
+        state.sharing=true;
         await navigator.share({files:[file]});
         $('ok').classList.remove('hidden');
         $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
         return;
-      }catch(e){ if(e && e.name==='AbortError') return; }
+      }catch(e){ if(e && e.name==='AbortError') return; }finally{ state.sharing=false; }
     }
     showBlobFallback(blobUrl, file);
   }catch(e){
@@ -575,15 +576,16 @@ async function shareVideoFile(url){
 
     state.videoFile = file;
     const blobUrl = URL.createObjectURL(blob);
-    if(navigator.canShare && navigator.canShare({files:[file]})){
+    if(navigator.canShare && navigator.canShare({files:[file]}) && !state.sharing){
       try{
+        state.sharing=true;
         await navigator.share({files:[file]});
         $('ok').classList.remove('hidden');
         $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
         return;
       }catch(e){
         if(e && e.name==='AbortError') return;
-      }
+      }finally{ state.sharing=false; }
     }
     showBlobFallback(blobUrl, file);
   }catch(e){
@@ -607,14 +609,16 @@ function showBlobFallback(blobUrl, file){
 async function reshare(){
   const file = state.videoFile;
   if(!file){ showErr('請先點擊下載影片'); return; }
+  if(state.sharing) return;
   try{
+    state.sharing=true;
     await navigator.share({files:[file]});
     $('ok').classList.remove('hidden');
     $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
   }catch(e){
     if(e && e.name==='AbortError') return;
     showErr('分享失敗：'+e.message);
-  }
+  }finally{ state.sharing=false; }
 }
 
 function loadVideoForIOS(url){
