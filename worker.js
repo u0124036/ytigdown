@@ -7,21 +7,12 @@ const COBALT = [
   'https://api.cobalt.tools/',
 ];
 
-const PIPED = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.adminforge.de',
-  'https://pipedapi.r4fo.com',
-  'https://api.piped.yt',
-];
-
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
   'Access-Control-Allow-Headers': 'Content-Type, Accept, Range',
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition',
 };
-
-/* ── cobalt (for Instagram etc.) ── */
 
 async function tryCobalt(base, body, timeoutMs) {
   const ctrl = new AbortController();
@@ -42,61 +33,6 @@ async function tryCobalt(base, body, timeoutMs) {
   }
 }
 
-/* ── Piped (for YouTube) ── */
-
-function extractYTId(url) {
-  const m = url.match(/(?:v=|youtu\.be\/|\/shorts\/)([\w-]{11})/);
-  return m ? m[1] : null;
-}
-
-async function tryPipedInstance(base, videoId, timeoutMs) {
-  const ctrl = new AbortController();
-  const tid = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const r = await fetch(`${base}/streams/${videoId}`, { signal: ctrl.signal });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    const muxed = (data.videoStreams || [])
-      .filter(s => s.videoOnly === false)
-      .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
-    if (!muxed.length) throw new Error('no_muxed');
-    return {
-      streams: muxed,
-      meta: {
-        title: data.title || '',
-        uploader: data.uploader || '',
-        duration: data.duration || 0,
-        thumbnail: data.thumbnailUrl || '',
-      },
-    };
-  } catch (e) { throw e; }
-  finally { clearTimeout(tid); }
-}
-
-async function fetchYouTubePiped(videoId, quality) {
-  try {
-    const result = await Promise.any(
-      PIPED.map(b => tryPipedInstance(b, videoId, 12000))
-    );
-    let stream = result.streams[0];
-    if (quality && quality !== 'max') {
-      const qNum = parseInt(quality);
-      const match = result.streams.find(s => (parseInt(s.quality) || 0) <= qNum);
-      if (match) stream = match;
-    }
-    return {
-      status: 'tunnel',
-      url: stream.url,
-      title: result.meta.title,
-      uploader: result.meta.uploader,
-      duration: result.meta.duration,
-      thumbnail: result.meta.thumbnail,
-      quality: stream.quality,
-      availableQualities: result.streams.map(s => s.quality),
-    };
-  } catch { return null; }
-}
-
 /* ── proxy endpoint ── */
 
 async function proxyStream(req, url) {
@@ -112,14 +48,38 @@ async function proxyStream(req, url) {
   for (const [k, v] of upstream.headers) {
     const lk = k.toLowerCase();
     if (lk === 'content-type' || lk === 'content-length' || lk === 'content-range' ||
-        lk === 'accept-ranges' || lk === 'last-modified' || lk === 'etag') {
+        lk === 'accept-ranges' || lk === 'last-modified' || lk === 'etag' ||
+        lk === 'estimated-content-length' || lk === 'content-disposition') {
       h.set(k, v);
     }
   }
   if (!h.has('Content-Type')) h.set('Content-Type', 'video/mp4');
-  h.set('Content-Disposition', 'attachment; filename="video.mp4"');
+  if (!h.has('Content-Disposition')) h.set('Content-Disposition', 'attachment; filename="video.mp4"');
+  // Forward estimated-content-length as Content-Length if missing
+  if (!h.has('Content-Length') && h.has('Estimated-Content-Length')) {
+    h.set('Content-Length', h.get('Estimated-Content-Length'));
+  }
   for (const [k, v] of Object.entries(CORS)) h.set(k, v);
   return new Response(upstream.body, { status: upstream.status, headers: h });
+}
+
+/* Rewrite URLs in cobalt response: wrap http:// URLs in our proxy */
+function rewriteResponse(text, selfOrigin) {
+  try {
+    const j = JSON.parse(text);
+    if (j.url && j.url.startsWith('http://')) {
+      j.url = selfOrigin + '/proxy?u=' + encodeURIComponent(j.url);
+    }
+    if (j.picker && Array.isArray(j.picker)) {
+      j.picker = j.picker.map(item => {
+        if (item.url && item.url.startsWith('http://')) {
+          item.url = selfOrigin + '/proxy?u=' + encodeURIComponent(item.url);
+        }
+        return item;
+      });
+    }
+    return JSON.stringify(j);
+  } catch { return text; }
 }
 
 /* ── main handler ── */
@@ -131,6 +91,7 @@ export default {
     }
 
     const u = new URL(req.url);
+    const selfOrigin = u.origin;
 
     if (u.pathname === '/proxy') {
       const target = u.searchParams.get('u');
@@ -149,7 +110,7 @@ export default {
     }
 
     if (req.method === 'GET') {
-      return new Response(JSON.stringify({ status: 'ok', cobalt: COBALT.length, piped: PIPED.length }), {
+      return new Response(JSON.stringify({ status: 'ok', instances: COBALT.length }), {
         headers: { 'Content-Type': 'application/json', ...CORS },
       });
     }
@@ -161,40 +122,16 @@ export default {
       });
     }
 
-    const isYT = /youtube\.com|youtu\.be/i.test(body.url || '');
-    const videoId = isYT ? extractYTId(body.url) : null;
-
-    /* ── YouTube: Piped first, cobalt fallback ── */
-    if (isYT && videoId) {
-      const piped = await fetchYouTubePiped(videoId, body.videoQuality);
-      if (piped) {
-        return new Response(JSON.stringify(piped), {
-          headers: { 'Content-Type': 'application/json', ...CORS },
-        });
-      }
-    }
-
-    /* ── cobalt (Instagram, or YouTube fallback) ── */
     const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 15000)));
 
     const isValid = r => {
       if (!r.ok) return false;
       try { return JSON.parse(r.text).status !== 'error'; } catch { return false; }
     };
-    const isTunnel = r => {
-      try {
-        const j = JSON.parse(r.text);
-        if (j.status === 'tunnel') return true;
-        const base = r.base.replace(/\/$/, '');
-        if (j.url && j.url.startsWith(base)) return true;
-        if (j.url && !/googlevideo\.com|youtube\.com/.test(j.url)) return true;
-        return false;
-      } catch { return false; }
-    };
-    const winner = results.find(r => isValid(r) && isTunnel(r))
-      || results.find(r => isValid(r));
+    const winner = results.find(r => isValid(r));
     if (winner) {
-      return new Response(winner.text, {
+      const rewritten = rewriteResponse(winner.text, selfOrigin);
+      return new Response(rewritten, {
         headers: { 'Content-Type': 'application/json', ...CORS },
       });
     }
@@ -209,7 +146,7 @@ export default {
 
     return new Response(JSON.stringify({
       status: 'error',
-      error: { code: 'all_failed', detail: (isYT ? 'piped:all_failed | ' : '') + detail },
+      error: { code: 'all_failed', detail },
     }), {
       status: 502,
       headers: { 'Content-Type': 'application/json', ...CORS },

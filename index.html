@@ -209,7 +209,7 @@ textarea,input{-webkit-user-select:text;user-select:text}
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v14</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v15</div>
 </div>
 
 <script>
@@ -389,25 +389,10 @@ function showCard(url, data){
   const isYT=/youtube\.com|youtu\.be/.test(url);
   $('thumb').style.display='none';
   $('dur').classList.add('hidden');
-  // Use metadata from API if available
-  if(data && data.title){
-    $('ttl').textContent=data.title;
-  } else {
-    $('ttl').textContent=isYT?'YouTube 影片':'Instagram 影片';
-  }
-  if(data && data.uploader){
-    $('upl').textContent=data.uploader;
-  } else {
-    $('upl').textContent='';
-  }
-  // Thumbnail: use API thumbnail, fallback to ytimg
-  const thumbUrl = (data && data.thumbnail) ? data.thumbnail : null;
-  if(thumbUrl){
-    const img=$('thumb');
-    img.src=thumbUrl;
-    img.style.display='block';
-    img.onerror=()=>{img.style.display='none';};
-  } else if(isYT){
+  $('ttl').textContent=isYT?'YouTube 影片':'Instagram 影片';
+  $('upl').textContent='';
+  // Thumbnail from ytimg
+  if(isYT){
     const m=url.match(/(?:v=|youtu\.be\/)([\w-]{11})/);
     if(m){
       const img=$('thumb');
@@ -416,21 +401,9 @@ function showCard(url, data){
       img.onerror=()=>{img.style.display='none';};
     }
   }
-  // Duration badge
-  if(data && data.duration > 0){
-    $('dur').textContent=fmtDur(data.duration);
-    $('dur').classList.remove('hidden');
-  }
-  // Quality chips
-  let qualities;
-  if(data && data.availableQualities && data.availableQualities.length){
-    qualities = data.availableQualities.map(q => [q.replace('p',''), q]);
-    qualities.unshift(['max','最高畫質']);
-  } else if(isYT){
-    qualities=[['max','最高畫質'],['720','720p'],['480','480p'],['360','360p']];
-  } else {
-    qualities=[['max','最高畫質']];
-  }
+  const qualities=isYT
+    ?[['max','最高畫質'],['720','720p'],['480','480p'],['360','360p']]
+    :[['max','最高畫質']];
   $('chips').innerHTML='';
   qualities.forEach(([q,label],i)=>{
     const c=document.createElement('button');
@@ -502,22 +475,8 @@ async function shareVideoFile(url){
   $('progLbl').textContent='下載影片中…';
   $('btnDl').disabled=true;
   try{
-    // Piped proxy URLs and cobalt tunnel URLs have CORS — fetch directly
-    // Only use our proxy for CDN URLs (instagram, fbcdn etc.)
-    const needsProxy = /instagram\.com|cdninstagram\.com|fbcdn\.net/.test(url);
-    let r;
-    if(needsProxy){
-      r = await fetch(proxify(url));
-    } else {
-      // Direct fetch (Piped proxy or cobalt tunnel)
-      try{
-        r = await fetch(url);
-        if(!r.ok) throw new Error('direct:'+r.status);
-      }catch(directErr){
-        // Fallback to our proxy
-        r = await fetch(proxify(url));
-      }
-    }
+    // All URLs from Worker are now HTTPS (tunnel URLs rewritten to our proxy)
+    const r = await fetch(url);
     if(!r.ok) throw new Error('HTTP '+r.status);
     const total = +(r.headers.get('Content-Length')||0);
     const reader = r.body.getReader();
