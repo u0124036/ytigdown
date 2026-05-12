@@ -209,7 +209,7 @@ textarea,input{-webkit-user-select:text;user-select:text}
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v15</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v16</div>
 </div>
 
 <script>
@@ -225,6 +225,7 @@ const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
 
 const API_ENDPOINT = 'https://video-api.s0937854008.workers.dev/';
 const PROXY_ENDPOINT = 'https://video-api.s0937854008.workers.dev/proxy?u=';
+const DOWNLOAD_ENDPOINT = 'https://video-api.s0937854008.workers.dev/download';
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 const proxify = u => PROXY_ENDPOINT + encodeURIComponent(u);
 
@@ -456,7 +457,13 @@ function showPicker(items){
 
 async function download(){
   if(state.isPicker) return;
-  // Always re-fetch to get a fresh URL (tunnel URLs expire quickly)
+  const isYT = /youtube\.com|youtu\.be/.test(state.url);
+  if(isYT){
+    // YouTube: use /download endpoint (all-in-one to avoid IP mismatch)
+    isIOS ? downloadYTForIOS() : downloadYTDirect();
+    return;
+  }
+  // Instagram: re-fetch URL then use proxy
   $('loadTxt').textContent='取得下載連結…';
   $('loading').classList.remove('hidden');
   try{
@@ -466,6 +473,73 @@ async function download(){
     state.cobaltUrl=data.url;
   }catch(e){$('loading').classList.add('hidden');showErr('下載失敗：'+e.message);return;}
   isIOS ? loadVideoForIOS(state.cobaltUrl) : triggerDownload(state.cobaltUrl);
+}
+
+async function downloadYTForIOS(){
+  $('ok').classList.add('hidden');
+  $('prog').classList.remove('hidden');
+  $('pb').style.width='10%';
+  $('progLbl').textContent='下載影片中（合併取得+下載）…';
+  $('btnDl').disabled=true;
+  try{
+    const r = await fetchWithTimeout(DOWNLOAD_ENDPOINT, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:state.url, videoQuality:state.quality}),
+    }, 120000);
+    if(!r.ok){
+      let msg='HTTP '+r.status;
+      try{const j=await r.json();if(j.error)msg=j.error.code||j.error.detail||msg;}catch(_){}
+      throw new Error(msg);
+    }
+    const total = +(r.headers.get('Content-Length')||0);
+    const reader = r.body.getReader();
+    const chunks=[]; let received=0;
+    while(true){
+      const {done,value}=await reader.read();
+      if(done) break;
+      chunks.push(value); received+=value.length;
+      if(total){
+        const pct = Math.min(95, Math.round(received/total*100));
+        $('pb').style.width = pct+'%';
+        $('progLbl').textContent = '下載中… '+pct+'%';
+      } else {
+        $('progLbl').textContent = '下載中… '+(received>>20)+' MB';
+      }
+    }
+    const blob = new Blob(chunks, {type:'video/mp4'});
+    const file = new File([blob], 'video.mp4', {type:'video/mp4'});
+    $('pb').style.width='100%';
+    $('prog').classList.add('hidden');
+    $('btnDl').disabled=false;
+    state.videoFile = file;
+    const blobUrl = URL.createObjectURL(blob);
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      try{
+        await navigator.share({files:[file]});
+        $('ok').classList.remove('hidden');
+        $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
+        return;
+      }catch(e){ if(e && e.name==='AbortError') return; }
+    }
+    showBlobFallback(blobUrl, file);
+  }catch(e){
+    $('prog').classList.add('hidden');
+    $('btnDl').disabled=false;
+    showErr('下載失敗：'+e.message);
+  }
+}
+
+function downloadYTDirect(){
+  // Desktop: open /download as a direct link (browser handles the download)
+  const form = document.createElement('form');
+  form.method='POST'; form.action=DOWNLOAD_ENDPOINT; form.target='_blank';
+  const i1=document.createElement('input'); i1.type='hidden'; i1.name='url'; i1.value=state.url;
+  const i2=document.createElement('input'); i2.type='hidden'; i2.name='videoQuality'; i2.value=state.quality;
+  form.appendChild(i1); form.appendChild(i2);
+  document.body.appendChild(form); form.submit(); document.body.removeChild(form);
+  $('ok').classList.remove('hidden');
+  $('okTxt').textContent='開始下載中…';
 }
 
 async function shareVideoFile(url){

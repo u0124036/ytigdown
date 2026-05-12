@@ -33,53 +33,50 @@ async function tryCobalt(base, body, timeoutMs) {
   }
 }
 
-/* ── proxy endpoint ── */
+async function getCobaltUrl(body) {
+  const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 15000)));
+  const isValid = r => {
+    if (!r.ok) return false;
+    try { return JSON.parse(r.text).status !== 'error'; } catch { return false; }
+  };
+  const winner = results.find(r => isValid(r));
+  if (!winner) return null;
+  try { return JSON.parse(winner.text); } catch { return null; }
+}
+
+/* ── proxy: fetch upstream and stream back with CORS ── */
+
+function buildStreamHeaders(upstream) {
+  const h = new Headers();
+  for (const [k, v] of upstream.headers) {
+    const lk = k.toLowerCase();
+    if (lk === 'content-type' || lk === 'content-length' || lk === 'content-range' ||
+        lk === 'accept-ranges' || lk === 'last-modified' || lk === 'etag' ||
+        lk === 'content-disposition') {
+      h.set(k, v);
+    }
+  }
+  // cobalt uses Estimated-Content-Length
+  const est = upstream.headers.get('Estimated-Content-Length');
+  if (!h.has('Content-Length') && est) h.set('Content-Length', est);
+  if (!h.has('Content-Type')) h.set('Content-Type', 'video/mp4');
+  if (!h.has('Content-Disposition')) h.set('Content-Disposition', 'attachment; filename="video.mp4"');
+  for (const [k, v] of Object.entries(CORS)) h.set(k, v);
+  return h;
+}
 
 async function proxyStream(req, url) {
   const range = req.headers.get('Range');
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Accept': '*/*',
-    'Accept-Language': 'en-US,en;q=0.9',
   };
   if (range) headers['Range'] = range;
   const upstream = await fetch(url, { headers, redirect: 'follow' });
-  const h = new Headers();
-  for (const [k, v] of upstream.headers) {
-    const lk = k.toLowerCase();
-    if (lk === 'content-type' || lk === 'content-length' || lk === 'content-range' ||
-        lk === 'accept-ranges' || lk === 'last-modified' || lk === 'etag' ||
-        lk === 'estimated-content-length' || lk === 'content-disposition') {
-      h.set(k, v);
-    }
-  }
-  if (!h.has('Content-Type')) h.set('Content-Type', 'video/mp4');
-  if (!h.has('Content-Disposition')) h.set('Content-Disposition', 'attachment; filename="video.mp4"');
-  // Forward estimated-content-length as Content-Length if missing
-  if (!h.has('Content-Length') && h.has('Estimated-Content-Length')) {
-    h.set('Content-Length', h.get('Estimated-Content-Length'));
-  }
-  for (const [k, v] of Object.entries(CORS)) h.set(k, v);
-  return new Response(upstream.body, { status: upstream.status, headers: h });
-}
-
-/* Rewrite URLs in cobalt response: wrap http:// URLs in our proxy */
-function rewriteResponse(text, selfOrigin) {
-  try {
-    const j = JSON.parse(text);
-    if (j.url && j.url.startsWith('http://')) {
-      j.url = selfOrigin + '/proxy?u=' + encodeURIComponent(j.url);
-    }
-    if (j.picker && Array.isArray(j.picker)) {
-      j.picker = j.picker.map(item => {
-        if (item.url && item.url.startsWith('http://')) {
-          item.url = selfOrigin + '/proxy?u=' + encodeURIComponent(item.url);
-        }
-        return item;
-      });
-    }
-    return JSON.stringify(j);
-  } catch { return text; }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: buildStreamHeaders(upstream),
+  });
 }
 
 /* ── main handler ── */
@@ -91,8 +88,8 @@ export default {
     }
 
     const u = new URL(req.url);
-    const selfOrigin = u.origin;
 
+    /* /proxy?u=  — simple proxy for non-tunnel URLs (IG CDN etc.) */
     if (u.pathname === '/proxy') {
       const target = u.searchParams.get('u');
       if (!target) {
@@ -109,12 +106,59 @@ export default {
       }
     }
 
+    /*
+     * /download — all-in-one: ask cobalt + immediately stream the result
+     * This ensures the cobalt request and the tunnel fetch use the SAME Worker IP.
+     * Tunnel URLs are IP-bound, so splitting into 2 requests would fail.
+     */
+    if (u.pathname === '/download') {
+      let body;
+      try { body = await req.json(); } catch {
+        return new Response('{"error":"bad request"}', {
+          status: 400, headers: { 'Content-Type': 'application/json', ...CORS },
+        });
+      }
+      const data = await getCobaltUrl(body);
+      if (!data || !data.url) {
+        return new Response(JSON.stringify({
+          status: 'error', error: { code: 'no_url', detail: 'cobalt returned no download URL' },
+        }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS } });
+      }
+      try {
+        // Stream the video directly back — same IP as the cobalt request
+        const range = req.headers.get('Range');
+        const headers = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+        };
+        if (range) headers['Range'] = range;
+        const upstream = await fetch(data.url, { headers, redirect: 'follow' });
+        if (!upstream.ok && upstream.status !== 206) {
+          return new Response(JSON.stringify({
+            status: 'error', error: { code: 'tunnel_' + upstream.status },
+          }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS } });
+        }
+        const h = buildStreamHeaders(upstream);
+        // Use filename from cobalt if available
+        if (data.filename) {
+          h.set('Content-Disposition', 'attachment; filename="' + data.filename.replace(/"/g, '') + '"');
+        }
+        return new Response(upstream.body, { status: upstream.status, headers: h });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: 'download_failed', detail: e.message }), {
+          status: 502, headers: { 'Content-Type': 'application/json', ...CORS },
+        });
+      }
+    }
+
+    /* GET / — health check */
     if (req.method === 'GET') {
       return new Response(JSON.stringify({ status: 'ok', instances: COBALT.length }), {
         headers: { 'Content-Type': 'application/json', ...CORS },
       });
     }
 
+    /* POST / — info only (returns cobalt JSON for metadata) */
     let body;
     try { body = await req.json(); } catch {
       return new Response('{"error":"bad request"}', {
@@ -123,15 +167,13 @@ export default {
     }
 
     const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 15000)));
-
     const isValid = r => {
       if (!r.ok) return false;
       try { return JSON.parse(r.text).status !== 'error'; } catch { return false; }
     };
     const winner = results.find(r => isValid(r));
     if (winner) {
-      const rewritten = rewriteResponse(winner.text, selfOrigin);
-      return new Response(rewritten, {
+      return new Response(winner.text, {
         headers: { 'Content-Type': 'application/json', ...CORS },
       });
     }
