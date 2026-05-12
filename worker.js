@@ -56,7 +56,7 @@ async function fetchViaTcp(tunnelUrl) {
 
   const socket = connect({ hostname: host, port });
   const writer = socket.writable.getWriter();
-  const reqLine = `GET ${path} HTTP/1.1\r\nHost: ${host}:${port}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
+  const reqLine = `GET ${path} HTTP/1.0\r\nHost: ${host}:${port}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
   await writer.write(new TextEncoder().encode(reqLine));
   writer.releaseLock();
 
@@ -98,24 +98,25 @@ async function fetchViaTcp(tunnelUrl) {
   const bodyStart = headerEnd + 4;
   const leftover = headerBuf.slice(bodyStart);
 
-  reader.releaseLock();
+  // Stream the remaining body using a single reader
+  const isChunked = (respHeaders['transfer-encoding'] || '').toLowerCase().includes('chunked');
 
-  // Create a readable stream for the body
+  // For non-chunked (HTTP/1.0 or Content-Length), just pipe raw bytes
   const bodyStream = new ReadableStream({
     start(controller) {
       if (leftover.length > 0) controller.enqueue(leftover);
     },
     async pull(controller) {
-      const r = socket.readable.getReader();
       try {
-        const { done, value } = await r.read();
-        r.releaseLock();
+        const { done, value } = await reader.read();
         if (done) { controller.close(); return; }
         controller.enqueue(value);
       } catch (e) {
-        r.releaseLock();
         controller.close();
       }
+    },
+    cancel() {
+      reader.cancel().catch(() => {});
     },
   });
 
