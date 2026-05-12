@@ -9,7 +9,6 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#FF3B30">
 <title>影片下載器</title>
-<!-- Inline manifest via JS blob -->
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -125,10 +124,17 @@ body{
 }
 .ft{text-align:center;color:var(--t2);font-size:11px;margin-top:28px}
 .hidden{display:none!important}
-  body{-webkit-user-select:none;user-select:none}
+body{-webkit-user-select:none;user-select:none}
 textarea,input{-webkit-user-select:text;user-select:text}
 .vp video{-webkit-touch-callout:default}
 .vp{-webkit-touch-callout:default}
+.btn-safari{
+  display:flex;align-items:center;justify-content:center;
+  width:100%;background:#0a84ff;color:#fff;border-radius:var(--r);
+  padding:15px;font-size:16px;font-weight:700;text-decoration:none;
+  margin-top:8px;margin-bottom:14px;gap:6px;
+}
+.btn-safari:active{opacity:.75}
 </style>
 </head>
 <body>
@@ -193,6 +199,7 @@ textarea,input{-webkit-user-select:text;user-select:text}
     <div id="vp" class="vp hidden">
       <video id="vid" controls playsinline preload="metadata"></video>
     </div>
+    <a id="btnSafari" class="btn-safari hidden" target="_blank" rel="noopener">📤 在 Safari 開啟 → 點分享 → 儲存影片</a>
 
     <div id="picker" class="picker-grid hidden"></div>
     <div id="ok" class="ok hidden">✓ <span id="okTxt"></span></div>
@@ -200,21 +207,18 @@ textarea,input{-webkit-user-select:text;user-select:text}
     <button class="btn-dl" id="btnDl">⬇️ 下載影片</button>
 
     <div class="tip">
-      <div class="tip-t">📱 儲存到 iOS 相簿</div>
+      <div class="tip-t">📱 儲存到 iOS 相簿（兩種方式）</div>
       <ol>
-        <li>點擊上方 <strong>下載影片</strong></li>
-        <li>影片播放器出現後，<strong>長按影片畫面</strong></li>
-        <li>選 <strong>「儲存影片」</strong></li>
-        <li>即存入 <strong>相片 App</strong></li>
+        <li>點 <strong>下載影片</strong>，播放器出現後<strong>長按畫面</strong> → <strong>儲存影片</strong></li>
+        <li>或點藍色 <strong>在 Safari 開啟</strong> 按鈕，進去後點底部 <strong>分享 ↑</strong> → <strong>儲存影片</strong></li>
       </ol>
     </div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v8</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v9</div>
 </div>
 
 <script>
-// Icon must be defined first (used in manifest below)
 const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">' +
   '<rect width="192" height="192" rx="42" fill="#FF3B30"/>' +
@@ -225,11 +229,9 @@ const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
 (function(){
 'use strict';
 
-// Cloudflare Worker proxy (handles CORS + tries multiple cobalt instances)
 const API_ENDPOINT = 'https://video-api.s0937854008.workers.dev/';
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 
-// Polyfill-safe timeout helper (AbortSignal.timeout requires iOS 17.4+)
 function fetchWithTimeout(url, opts, ms){
   const ctrl = new AbortController();
   const tid = setTimeout(()=>ctrl.abort(), ms);
@@ -237,7 +239,6 @@ function fetchWithTimeout(url, opts, ms){
     .finally(()=>clearTimeout(tid));
 }
 
-// Test Worker connectivity on load (non-blocking, never throws)
 setTimeout(function(){
   const el = document.getElementById('workerStatus');
   if(!el) return;
@@ -266,16 +267,16 @@ async function cobaltFetch(payload) {
       body: JSON.stringify(payload),
     }, 20000);
     if (!resp.ok) {
-  let detail = 'HTTP '+resp.status;
-  try {
-    const j = await resp.json();
-    if(j.error && j.error.code){
-      detail = j.error.code;
-      if(j.error.detail) detail += ' (' + j.error.detail + ')';
+      let detail = 'HTTP '+resp.status;
+      try {
+        const j = await resp.json();
+        if(j.error && j.error.code){
+          detail = j.error.code;
+          if(j.error.detail) detail += ' (' + j.error.detail + ')';
+        }
+      } catch(_) {}
+      throw new Error(detail);
     }
-  } catch(_) {}
-  throw new Error(detail);
-}
     const data = await resp.json();
     if (data.status === 'error') {
       throw new Error((data.error && data.error.code) || data.text || '伺服器拒絕此連結');
@@ -287,7 +288,6 @@ async function cobaltFetch(payload) {
   }
 }
 
-// PWA: inline manifest
 const manifest = {
   name:'影片下載器',short_name:'影片下載',
   start_url:location.pathname,display:'standalone',
@@ -299,12 +299,10 @@ const mEl = document.createElement('link');
 mEl.rel='manifest'; mEl.href=URL.createObjectURL(mBlob);
 document.head.appendChild(mEl);
 
-// Apple touch icon via data URL
 const iconLink = document.createElement('link');
 iconLink.rel='apple-touch-icon'; iconLink.href=ICON_DATA_URL;
 document.head.appendChild(iconLink);
 
-// Unregister any old service worker and clear caches (was causing cache issues)
 if('serviceWorker' in navigator){
   navigator.serviceWorker.getRegistrations().then(regs=>{
     regs.forEach(r=>r.unregister());
@@ -314,7 +312,6 @@ if('serviceWorker' in navigator){
   }
 }
 
-// iOS install banner
 if(isIOS && window.navigator.standalone !== true){
   document.getElementById('installBanner').classList.remove('hidden');
 }
@@ -332,7 +329,7 @@ $('btnFetch').onclick = go;
 $('btnDl').onclick = download;
 
 function reset(){
-  ['result','err','prog','vp','ok','picker'].forEach(id=>$(id).classList.add('hidden'));
+  ['result','err','prog','vp','ok','picker','btnSafari'].forEach(id=>$(id).classList.add('hidden'));
   $('pb').style.width='0%';
   state={url:'',cobaltUrl:'',quality:'max',isPicker:false};
 }
@@ -342,7 +339,6 @@ function showErr(msg){
   const p = document.createElement('div');
   p.textContent = msg;
   $('err').appendChild(p);
-  // Fallback link to saveclip if URL was given
   if(state.url){
     const a = document.createElement('a');
     const target = /instagram\.com/i.test(state.url)
@@ -373,7 +369,6 @@ async function go(){
     $('loading').classList.add('hidden');
     $('btnFetch').disabled=false;
     if(data.status==='picker'){ showPicker(data.picker||[]); return; }
-    // handle stream / redirect / tunnel (cobalt v10 uses "tunnel")
     if(data.url){
       state.cobaltUrl=data.url;
       showCard(url);
@@ -474,7 +469,10 @@ function loadVideoForIOS(url){
     $('vp').classList.remove('hidden');
     $('btnDl').disabled=false;
     $('ok').classList.remove('hidden');
-    $('okTxt').textContent='長按影片 → 選「儲存影片」即可存至相簿';
+    $('okTxt').textContent='長按影片畫面中央 → 「儲存影片」';
+    const s=$('btnSafari');
+    s.href=url;
+    s.classList.remove('hidden');
   },{once:true});
   v.addEventListener('error',()=>{
     $('prog').classList.add('hidden');
