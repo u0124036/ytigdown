@@ -70,18 +70,18 @@ body{
   background:rgba(255,59,48,.12);border:1px solid rgba(255,59,48,.3);
   border-radius:10px;padding:13px 15px;color:#ff6b6b;font-size:14px;margin-bottom:14px;line-height:1.5;
 }
-.card{background:var(--s1);border-radius:var(--r);overflow:hidden;margin-bottom:14px}
-.thumb{position:relative;background:#000;aspect-ratio:16/9;overflow:hidden}
+.card{background:var(--s1);border-radius:var(--r);overflow:hidden;margin-bottom:10px;display:flex;align-items:stretch}
+.thumb{position:relative;background:#000;width:120px;min-height:68px;flex-shrink:0;overflow:hidden}
 .thumb img{width:100%;height:100%;object-fit:cover;display:block}
 .dur{
   position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,.75);color:#fff;
   font-size:12px;font-weight:600;padding:2px 7px;border-radius:5px;backdrop-filter:blur(4px);
 }
-.info{padding:12px 15px}
-.info .ttl{font-size:14px;font-weight:600;line-height:1.4;margin-bottom:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.info .upl{font-size:12px;color:var(--t2)}
-.qs{padding:0 15px 14px}
-.ql{font-size:11px;color:var(--t2);font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px}
+.info{padding:8px 12px;flex:1;min-width:0}
+.info .ttl{font-size:13px;font-weight:600;line-height:1.3;margin-bottom:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.info .upl{font-size:11px;color:var(--t2)}
+.qs{padding:0 12px 10px}
+.ql{font-size:10px;color:var(--t2);font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
 .qc{display:flex;gap:7px;flex-wrap:wrap}
 .chip{
   border:1.5px solid var(--br);background:transparent;color:var(--tx);border-radius:20px;
@@ -96,12 +96,12 @@ body{
 }
 .btn-dl:active{background:var(--rd);transform:scale(.98)}
 .btn-dl:disabled{opacity:.4;cursor:not-allowed;transform:none}
-.prog{background:var(--s1);border-radius:var(--r);padding:14px;margin-bottom:14px}
+.prog{background:var(--s1);border-radius:var(--r);padding:10px 14px;margin-bottom:10px}
 .prog-lbl{font-size:12px;color:var(--t2);margin-bottom:8px}
 .pb-bg{background:var(--s2);border-radius:4px;height:5px;overflow:hidden}
-.pb{background:var(--red);height:100%;border-radius:4px;width:0%;transition:width .3s}
-.vp{background:#000;border-radius:var(--r);overflow:hidden;margin-bottom:11px}
-.vp video{width:100%;display:block;max-height:260px;object-fit:contain}
+.pb{background:var(--red);height:100%;border-radius:4px;width:0%;transition:width .5s ease-out}
+.vp{background:#000;border-radius:var(--r);overflow:hidden;margin-bottom:8px}
+.vp video{width:100%;display:block;max-height:180px;object-fit:contain}
 .picker-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
 .picker-item{position:relative;background:#000;border-radius:10px;overflow:hidden;cursor:pointer;aspect-ratio:9/16}
 .picker-item img{width:100%;height:100%;object-fit:cover;display:block}
@@ -124,6 +124,11 @@ body{
 }
 .ft{text-align:center;color:var(--t2);font-size:11px;margin-top:28px}
 .hidden{display:none!important}
+.status-log{background:var(--s1);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:12px;font-family:monospace}
+.status-log .sl-item{display:flex;align-items:center;gap:6px;padding:2px 0;color:var(--t2)}
+.status-log .sl-item.trying{color:#888}
+.status-log .sl-item.ok{color:#30d158}
+.status-log .sl-item.fail{color:#ff6b6b}
 body{-webkit-user-select:none;user-select:none}
 textarea,input{-webkit-user-select:text;user-select:text}
 .vp video{-webkit-touch-callout:default}
@@ -172,17 +177,21 @@ textarea,input{-webkit-user-select:text;user-select:text}
     <div class="card" id="card">
       <div class="thumb">
         <img id="thumb" src="" alt="" style="display:none">
-        <span id="dur" class="dur hidden"></span>
       </div>
       <div class="info">
         <div id="ttl" class="ttl"></div>
         <div id="upl" class="upl"></div>
       </div>
-      <div class="qs">
-        <div class="ql">畫質選擇</div>
-        <div id="chips" class="qc"></div>
-      </div>
     </div>
+
+    <div class="qs" id="qsWrap" style="margin-bottom:8px">
+      <div class="ql">畫質選擇</div>
+      <div id="chips" class="qc"></div>
+    </div>
+
+    <button class="btn-dl" id="btnDl">⬇️ 下載影片</button>
+
+    <div id="statusLog" class="status-log hidden"></div>
 
     <div id="prog" class="prog hidden">
       <div class="prog-lbl"><span id="progLbl">準備中…</span></div>
@@ -193,18 +202,16 @@ textarea,input{-webkit-user-select:text;user-select:text}
       <video id="vid" controls playsinline preload="metadata"></video>
     </div>
 
-    <div id="saveActions" class="hidden" style="display:flex;gap:8px;margin-bottom:14px">
-      <button id="btnSavePhotos" class="btn-dl" style="flex:1;margin-bottom:0;background:#0a84ff">🖼️ 儲存到相簿</button>
-      <button id="btnSaveFiles" class="btn-dl" style="flex:1;margin-bottom:0;background:#30d158">📁 儲存到檔案</button>
+    <div id="saveActions" class="hidden" style="display:flex;gap:8px;margin-bottom:10px">
+      <button id="btnSavePhotos" class="btn-dl" style="flex:1;margin-bottom:0;background:#0a84ff;font-size:14px;padding:12px">🖼️ 儲存到相簿</button>
+      <button id="btnSaveFiles" class="btn-dl" style="flex:1;margin-bottom:0;background:#30d158;font-size:14px;padding:12px">📁 儲存到檔案</button>
     </div>
 
     <div id="picker" class="picker-grid hidden"></div>
     <div id="ok" class="ok hidden">✓ <span id="okTxt"></span></div>
-
-    <button class="btn-dl hidden" id="btnDl">⬇️ 下載影片</button>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v20</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v21</div>
 </div>
 
 <script>
@@ -309,7 +316,7 @@ if(isIOS && window.navigator.standalone !== true){
 }
 
 const $ = id => document.getElementById(id);
-let state = {url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null,sharing:false};
+let state = {url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null,sharing:false,blobUrl:null,downloading:false};
 
 $('btnPaste').onclick = async () => {
   try { const t=await navigator.clipboard.readText(); if(t)$('url').value=t.trim(); }
@@ -323,9 +330,10 @@ $('btnSavePhotos').onclick = () => saveToPhotos();
 $('btnSaveFiles').onclick = () => saveToFiles();
 
 function reset(){
-  ['result','err','prog','vp','ok','picker','saveActions'].forEach(id=>$(id).classList.add('hidden'));
+  ['result','err','prog','vp','ok','picker','saveActions','statusLog'].forEach(id=>$(id).classList.add('hidden'));
   $('pb').style.width='0%';
-  state={url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null,sharing:false,blobUrl:null};
+  $('statusLog').innerHTML='';
+  state={url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null,sharing:false,blobUrl:null,downloading:false};
 }
 
 function showErr(msg){
@@ -340,7 +348,7 @@ function showErr(msg){
       : 'https://en1.savefrom.net/1-youtube-video-downloader/#url=' + encodeURIComponent(state.url);
     a.href = target; a.target = '_blank'; a.rel = 'noopener';
     a.style.cssText = 'display:inline-block;margin-top:10px;color:#5ac8fa;font-size:13px;text-decoration:underline';
-    a.textContent = '👉 改用 saveclip / savefrom 開啟';
+    a.textContent = '👉 改用備用網站開啟';
     $('err').appendChild(a);
   }
   $('err').classList.remove('hidden');
@@ -355,19 +363,30 @@ async function go(){
   }
   reset();
   state.url=url;
-  $('loading').classList.remove('hidden');
-  $('loadTxt').textContent='正在取得影片資訊（YouTube 可能需 10-15 秒）…';
   $('btnFetch').disabled=true;
+
+  const isYT=/youtube\.com|youtu\.be/.test(url);
+  const isIG=/instagram\.com/.test(url);
+
+  if(isYT){
+    // YouTube: show card immediately (no API call needed for info)
+    showYTCard(url);
+    $('btnFetch').disabled=false;
+    // Don't auto-download — let user pick quality first
+    return;
+  }
+
+  // Instagram: need API to get URL
+  $('loading').classList.remove('hidden');
+  $('loadTxt').textContent='正在取得 Instagram 影片資訊…';
   try{
-    const data = await cobaltFetch({url, videoQuality:'1080'});
+    const data = await cobaltFetch({url, videoQuality:'max'});
     $('loading').classList.add('hidden');
     $('btnFetch').disabled=false;
     if(data.status==='picker'){ showPicker(data.picker||[]); return; }
     if(data.url){
       state.cobaltUrl=data.url;
-      showCard(url, data);
-      // Auto-start download
-      download();
+      showIGCard(url, data);
     } else {
       showErr('取得影片失敗，請換一個連結試試');
     }
@@ -378,61 +397,61 @@ async function go(){
   }
 }
 
-function fmtDur(sec){
-  if(!sec||sec<=0) return '';
-  const m=Math.floor(sec/60), s=sec%60;
-  return m+':'+(s<10?'0':'')+s;
-}
-
-function showCard(url, data){
-  const isYT=/youtube\.com|youtu\.be/.test(url);
+function showYTCard(url){
+  const m=url.match(/(?:v=|youtu\.be\/)([\w-]{11})/);
   $('thumb').style.display='none';
-  $('dur').classList.add('hidden');
-  $('ttl').textContent=isYT?'YouTube 影片':'Instagram 影片';
-  $('upl').textContent='';
-  // Thumbnail from ytimg
-  if(isYT){
-    const m=url.match(/(?:v=|youtu\.be\/)([\w-]{11})/);
-    if(m){
-      const img=$('thumb');      img.crossOrigin='anonymous';
-      img.referrerPolicy='no-referrer';      img.src='https://i.ytimg.com/vi/'+m[1]+'/hqdefault.jpg';
-      img.style.display='block';
+  if(m){
+    const img=$('thumb');
+    img.crossOrigin='anonymous';
+    img.referrerPolicy='no-referrer';
+    img.src='https://i.ytimg.com/vi/'+m[1]+'/mqdefault.jpg';
+    img.style.display='block';
+    img.onerror=()=>{
+      // Fallback to hqdefault
       img.onerror=()=>{img.style.display='none';};
-    }
+      img.src='https://i.ytimg.com/vi/'+m[1]+'/hqdefault.jpg';
+    };
   }
-  const qualities=isYT
-    ?[['max','最高畫質'],['720','720p'],['480','480p'],['360','360p']]
-    :[['max','最高畫質']];
+  $('ttl').textContent='YouTube 影片';
+  $('upl').textContent='選擇畫質後點擊下載';
+  const qualities=[['max','最高畫質'],['720','720p'],['480','480p'],['360','360p']];
   $('chips').innerHTML='';
   qualities.forEach(([q,label],i)=>{
     const c=document.createElement('button');
     c.className='chip'+(i===0?' on':'');
     c.textContent=label; c.dataset.q=q;
-    c.onclick=async()=>{
+    c.onclick=()=>{
+      if(state.downloading) return;
       document.querySelectorAll('.chip').forEach(x=>x.classList.remove('on'));
       c.classList.add('on'); state.quality=q;
-      await refetch(q);
     };
     $('chips').appendChild(c);
   });
   state.quality='max';
+  $('qsWrap').classList.remove('hidden');
+  $('btnDl').classList.remove('hidden');
   $('result').classList.remove('hidden');
 }
 
-async function refetch(quality){
-  $('loadTxt').textContent='切換畫質…';
-  $('loading').classList.remove('hidden');
-  try{
-    const data = await cobaltFetch({url:state.url, videoQuality:quality});
-    $('loading').classList.add('hidden');
-    if(data.url) state.cobaltUrl=data.url;
-  }catch{ $('loading').classList.add('hidden'); }
+function showIGCard(url, data){
+  $('thumb').style.display='none';
+  $('ttl').textContent='Instagram 影片';
+  $('upl').textContent='點擊下載';
+  $('chips').innerHTML='';
+  const c=document.createElement('button');
+  c.className='chip on'; c.textContent='最高畫質'; c.dataset.q='max';
+  $('chips').appendChild(c);
+  state.quality='max';
+  $('qsWrap').classList.remove('hidden');
+  $('btnDl').classList.remove('hidden');
+  $('result').classList.remove('hidden');
 }
 
 function showPicker(items){
   state.isPicker=true;
   $('result').classList.remove('hidden');
   $('card').classList.add('hidden');
+  $('qsWrap').classList.add('hidden');
   $('btnDl').classList.add('hidden');
   const p=$('picker');
   p.innerHTML='';
@@ -454,93 +473,178 @@ function showPicker(items){
 }
 
 async function download(){
-  if(state.isPicker) return;
+  if(state.isPicker || state.downloading) return;
+  state.downloading=true;
+  $('btnDl').disabled=true;
   const isYT = /youtube\.com|youtu\.be/.test(state.url);
   if(isYT){
-    // YouTube: use /download endpoint (all-in-one to avoid IP mismatch)
-    isIOS ? downloadYTForIOS() : downloadYTDirect();
+    isIOS ? await downloadYTWithStatus() : downloadYTDirect();
     return;
   }
-  // Instagram: re-fetch URL then use proxy
-  $('loadTxt').textContent='取得下載連結…';
-  $('loading').classList.remove('hidden');
-  try{
-    const data = await cobaltFetch({url:state.url, videoQuality:state.quality});
-    $('loading').classList.add('hidden');
-    if(!data.url){showErr('下載連結取得失敗');return;}
-    state.cobaltUrl=data.url;
-  }catch(e){$('loading').classList.add('hidden');showErr('下載失敗：'+e.message);return;}
-  isIOS ? loadVideoForIOS(state.cobaltUrl) : triggerDownload(state.cobaltUrl);
+  // Instagram: use proxy
+  if(!state.cobaltUrl){
+    $('loading').classList.remove('hidden');
+    $('loadTxt').textContent='取得下載連結…';
+    try{
+      const data = await cobaltFetch({url:state.url, videoQuality:state.quality});
+      $('loading').classList.add('hidden');
+      if(!data.url){showErr('下載連結取得失敗');state.downloading=false;$('btnDl').disabled=false;return;}
+      state.cobaltUrl=data.url;
+    }catch(e){$('loading').classList.add('hidden');showErr('下載失敗：'+e.message);state.downloading=false;$('btnDl').disabled=false;return;}
+  }
+  await streamAndSave(proxify(state.cobaltUrl));
 }
 
-async function downloadYTForIOS(){
+/* YouTube download with status reporting */
+async function downloadYTWithStatus(){
   $('ok').classList.add('hidden');
   $('saveActions').classList.add('hidden');
+  $('vp').classList.add('hidden');
+  $('statusLog').innerHTML='';
+  $('statusLog').classList.remove('hidden');
   $('prog').classList.remove('hidden');
-  $('pb').style.width='10%';
-  $('progLbl').textContent='下載影片中…';
-  $('btnDl').disabled=true;
+  $('pb').style.width='0%';
+  $('progLbl').textContent='尋找可用伺服器…';
+
   try{
     const r = await fetchWithTimeout(DOWNLOAD_ENDPOINT, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({url:state.url, videoQuality:state.quality}),
     }, 120000);
-    if(!r.ok){
-      let msg='HTTP '+r.status;
-      try{const j=await r.json();if(j.error)msg=j.error.code||j.error.detail||msg;}catch(_){}
-      throw new Error(msg);
-    }
-    const total = +(r.headers.get('Content-Length')||0);
+
     const reader = r.body.getReader();
-    const chunks=[]; let received=0;
+    const dec = new TextDecoder();
+    let lineBuf = '';
+    let streamStarted = false;
+    const chunks = [];
+    let received = 0;
+    let totalSize = 0;
+    let filename = 'video.mp4';
+
     while(true){
-      const {done,value}=await reader.read();
+      const {done, value} = await reader.read();
       if(done) break;
-      chunks.push(value); received+=value.length;
-      if(total){
-        const pct = Math.min(95, Math.round(received/total*100));
-        $('pb').style.width = pct+'%';
-        $('progLbl').textContent = '下載中… '+pct+'%';
+
+      if(!streamStarted){
+        // Parse status lines
+        lineBuf += dec.decode(value, {stream:true});
+        const parts = lineBuf.split('\n');
+        lineBuf = parts.pop(); // keep incomplete line
+        for(const line of parts){
+          if(line === '---STREAM---'){
+            streamStarted = true;
+            $('progLbl').textContent = '下載中… 0 MB';
+            // Any remaining data in lineBuf is video bytes
+            if(lineBuf.length > 0){
+              const leftover = new TextEncoder().encode(lineBuf);
+              chunks.push(leftover);
+              received += leftover.length;
+            }
+            lineBuf = '';
+            break;
+          }
+          if(!line.trim()) continue;
+          try{
+            const ev = JSON.parse(line);
+            updateStatusLog(ev);
+            if(ev.status === 'ok'){
+              totalSize = ev.size || 0;
+              if(ev.filename) filename = ev.filename;
+            }
+            if(ev.status === 'error'){
+              throw new Error(ev.detail || 'all_failed');
+            }
+          }catch(e){
+            if(e.message && e.message !== 'all_failed' && !e.message.includes('JSON')) continue;
+            throw e;
+          }
+        }
       } else {
-        $('progLbl').textContent = '下載中… '+(received>>20)+' MB';
+        // Video stream bytes
+        chunks.push(value);
+        received += value.length;
+        if(totalSize > 0){
+          const pct = Math.min(99, Math.round(received / totalSize * 100));
+          $('pb').style.width = pct + '%';
+          $('progLbl').textContent = '下載中… ' + pct + '% (' + (received>>20) + ' MB)';
+        } else {
+          // No total size: show MB only, advance bar slowly
+          const fakePct = Math.min(90, Math.round(Math.sqrt(received / 1048576) * 15));
+          $('pb').style.width = fakePct + '%';
+          $('progLbl').textContent = '下載中… ' + (received>>20) + ' MB';
+        }
       }
     }
+
+    if(!streamStarted || chunks.length === 0){
+      throw new Error('伺服器未回傳影片資料');
+    }
+
     const blob = new Blob(chunks, {type:'video/mp4'});
-    const file = new File([blob], 'video.mp4', {type:'video/mp4'});
-    $('pb').style.width='100%';
-    $('prog').classList.add('hidden');
-    $('btnDl').disabled=false;
+    const file = new File([blob], filename, {type:'video/mp4'});
+    $('pb').style.width = '100%';
+    $('progLbl').textContent = '下載完成 ' + (received>>20) + ' MB';
     state.videoFile = file;
     state.blobUrl = URL.createObjectURL(blob);
-    // Show video preview + save options
+    state.downloading = false;
+    $('btnDl').disabled = false;
     showDownloadComplete();
   }catch(e){
     $('prog').classList.add('hidden');
-    $('btnDl').disabled=false;
-    showErr('下載失敗：'+e.message);
+    $('btnDl').disabled = false;
+    state.downloading = false;
+    showErr('下載失敗：' + e.message);
+  }
+}
+
+function updateStatusLog(ev){
+  const log = $('statusLog');
+  const name = ev.instance || '?';
+  const id = 'sl-' + name.replace(/[^a-z0-9]/gi, '_');
+  let el = document.getElementById(id);
+  if(!el){
+    el = document.createElement('div');
+    el.className = 'sl-item trying';
+    el.id = id;
+    log.appendChild(el);
+  }
+  if(ev.status === 'trying'){
+    el.className = 'sl-item trying';
+    el.textContent = '› ' + name + ' …';
+  } else if(ev.status === 'ok'){
+    el.className = 'sl-item ok';
+    el.textContent = '✓ ' + name + ' (' + ev.method + ')';
+    $('progLbl').textContent = '開始下載…';
+  } else if(ev.status === 'fail'){
+    el.className = 'sl-item fail';
+    el.textContent = '✗ ' + name + (ev.detail ? ' — ' + ev.detail : '');
+  } else if(ev.status === 'error'){
+    el.className = 'sl-item fail';
+    el.textContent = '✗ ' + (ev.detail || 'error');
   }
 }
 
 function downloadYTDirect(){
-  // Desktop: open /download as a direct link (browser handles the download)
   const form = document.createElement('form');
-  form.method='POST'; form.action=DOWNLOAD_ENDPOINT; form.target='_blank';
+  form.method='POST'; form.action=DOWNLOAD_ENDPOINT+'?direct=1'; form.target='_blank';
   const i1=document.createElement('input'); i1.type='hidden'; i1.name='url'; i1.value=state.url;
   const i2=document.createElement('input'); i2.type='hidden'; i2.name='videoQuality'; i2.value=state.quality;
   form.appendChild(i1); form.appendChild(i2);
   document.body.appendChild(form); form.submit(); document.body.removeChild(form);
   $('ok').classList.remove('hidden');
   $('okTxt').textContent='開始下載中…';
+  state.downloading=false;
+  $('btnDl').disabled=false;
 }
 
-async function shareVideoFile(url){
+/* IG / generic stream download */
+async function streamAndSave(url){
   $('ok').classList.add('hidden');
   $('saveActions').classList.add('hidden');
   $('prog').classList.remove('hidden');
-  $('pb').style.width='10%';
+  $('pb').style.width='0%';
   $('progLbl').textContent='下載影片中…';
-  $('btnDl').disabled=true;
   try{
     const r = await fetch(url);
     if(!r.ok) throw new Error('HTTP '+r.status);
@@ -552,7 +656,7 @@ async function shareVideoFile(url){
       if(done) break;
       chunks.push(value); received+=value.length;
       if(total){
-        const pct = Math.min(95, Math.round(received/total*100));
+        const pct = Math.min(99, Math.round(received/total*100));
         $('pb').style.width = pct+'%';
         $('progLbl').textContent = '下載中… '+pct+'%';
       } else {
@@ -562,19 +666,21 @@ async function shareVideoFile(url){
     const blob = new Blob(chunks, {type:'video/mp4'});
     const file = new File([blob], 'video.mp4', {type:'video/mp4'});
     $('pb').style.width='100%';
-    $('prog').classList.add('hidden');
-    $('btnDl').disabled=false;
     state.videoFile = file;
     state.blobUrl = URL.createObjectURL(blob);
+    state.downloading = false;
+    $('btnDl').disabled = false;
     showDownloadComplete();
   }catch(e){
     $('prog').classList.add('hidden');
-    $('btnDl').disabled=false;
+    $('btnDl').disabled = false;
+    state.downloading = false;
     showErr('下載失敗：'+e.message);
   }
 }
 
 function showDownloadComplete(){
+  $('prog').classList.add('hidden');
   const v=$('vid');
   v.src=state.blobUrl; v.load();
   $('vp').classList.remove('hidden');
@@ -611,10 +717,6 @@ function saveToFiles(){
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   $('ok').classList.remove('hidden');
   $('okTxt').textContent='已開始儲存到檔案';
-}
-
-function loadVideoForIOS(url){
-  shareVideoFile(url);
 }
 
 function triggerDownload(url){

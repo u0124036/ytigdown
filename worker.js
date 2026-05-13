@@ -190,17 +190,24 @@ export default {
     }
 
     /*
-     * /download — all-in-one: ask cobalt + immediately stream the result.
-     * Tunnel URLs are IP-bound. We try each cobalt instance sequentially,
-     * immediately test the tunnel, and retry with the next instance on 403.
-     * We also retry the same URL up to 3 times (Worker may get a matching IP).
+     * /download — all-in-one with status reporting.
+     * Protocol: first sends JSON status lines (each \n-terminated),
+     * then a delimiter line "---STREAM---\n", then raw video bytes.
+     * Each status line: {"instance":"name","status":"trying|ok|fail","detail":"..."}
      */
     if (u.pathname === '/download') {
+      const direct = u.searchParams.get('direct') === '1';
       let body;
-      try { body = await req.json(); } catch {
-        return new Response('{"error":"bad request"}', {
-          status: 400, headers: { 'Content-Type': 'application/json', ...CORS },
-        });
+      const ct = (req.headers.get('Content-Type') || '').toLowerCase();
+      if (ct.includes('application/x-www-form-urlencoded')) {
+        const fd = await req.formData();
+        body = Object.fromEntries(fd.entries());
+      } else {
+        try { body = await req.json(); } catch {
+          return new Response('{"error":"bad request"}', {
+            status: 400, headers: { 'Content-Type': 'application/json', ...CORS },
+          });
+        }
       }
 
       const range = req.headers.get('Range');
@@ -210,65 +217,151 @@ export default {
       };
       if (range) fetchHeaders['Range'] = range;
 
-      // Shuffle cobalt list for load distribution
+      const enc = new TextEncoder();
       const shuffled = [...COBALT].sort(() => Math.random() - 0.5);
-      const errors = [];
 
-      for (const base of shuffled) {
-        const cobaltResult = await tryCobalt(base, body, 12000);
-        if (!cobaltResult.ok) { errors.push(base + ':cobalt_fail'); continue; }
-        let data;
-        try { data = JSON.parse(cobaltResult.text); } catch { continue; }
-        if (data.status === 'error' || !data.url) { errors.push(base + ':no_url'); continue; }
-
-        // Try fetching the tunnel URL: first via fetch(), then via TCP socket
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            if (attempt === 0) {
-              // Try normal fetch first
-              const upstream = await fetch(data.url, { headers: fetchHeaders, redirect: 'follow' });
-              if (upstream.ok || upstream.status === 206) {
-                const h = buildStreamHeaders(upstream);
-                if (data.filename) {
-                  h.set('Content-Disposition', 'attachment; filename="' + data.filename.replace(/"/g, '') + '"');
+      /* ── Direct mode: stream video bytes directly (for desktop form POST) ── */
+      if (direct) {
+        const errors = [];
+        for (const base of shuffled) {
+          const name = base.replace(/^https?:\/\//, '').replace(/\/$/, '');
+          const cobaltResult = await tryCobalt(base, body, 12000);
+          if (!cobaltResult.ok) { errors.push(name + ':cobalt_fail'); continue; }
+          let data;
+          try { data = JSON.parse(cobaltResult.text); } catch { errors.push(name + ':bad_json'); continue; }
+          if (data.status === 'error' || !data.url) {
+            errors.push(name + ':' + (data.error?.code || 'no_url')); continue;
+          }
+          const fn = data.filename || 'video.mp4';
+          // Try fetch then TCP
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              if (attempt === 0) {
+                const upstream = await fetch(data.url, { headers: fetchHeaders, redirect: 'follow' });
+                if (upstream.ok || upstream.status === 206) {
+                  const h = buildStreamHeaders(upstream);
+                  h.set('Content-Disposition', 'attachment; filename="' + fn.replace(/"/g, '') + '"');
+                  return new Response(upstream.body, { status: upstream.status, headers: h });
                 }
-                return new Response(upstream.body, { status: upstream.status, headers: h });
-              }
-              if (upstream.status === 403) {
-                errors.push(base + ':fetch_403');
-                continue; // try TCP next
-              }
-              errors.push(base + ':fetch_' + upstream.status);
-              break;
-            } else {
-              // Try TCP socket connection (might share egress IP with cobalt fetch)
-              const tcpResp = await fetchViaTcp(data.url);
-              if (tcpResp.status === 200 || tcpResp.status === 206) {
-                const h = new Headers();
-                if (tcpResp.headers['content-type']) h.set('Content-Type', tcpResp.headers['content-type']);
-                else h.set('Content-Type', 'video/mp4');
-                if (tcpResp.headers['content-length']) h.set('Content-Length', tcpResp.headers['content-length']);
-                if (data.filename) {
-                  h.set('Content-Disposition', 'attachment; filename="' + data.filename.replace(/"/g, '') + '"');
-                } else {
-                  h.set('Content-Disposition', 'attachment; filename="video.mp4"');
+                if (upstream.status === 403) continue;
+                errors.push(name + ':fetch_' + upstream.status); break;
+              } else {
+                const tcpResp = await fetchViaTcp(data.url);
+                if (tcpResp.status === 200 || tcpResp.status === 206) {
+                  const h = new Headers();
+                  h.set('Content-Type', 'video/mp4');
+                  h.set('Content-Disposition', 'attachment; filename="' + fn.replace(/"/g, '') + '"');
+                  if (tcpResp.headers['content-length']) h.set('Content-Length', tcpResp.headers['content-length']);
+                  if (tcpResp.headers['estimated-content-length']) h.set('Content-Length', tcpResp.headers['estimated-content-length']);
+                  for (const [k, v] of Object.entries(CORS)) h.set(k, v);
+                  return new Response(tcpResp.body, { status: tcpResp.status, headers: h });
                 }
-                for (const [k, v] of Object.entries(CORS)) h.set(k, v);
-                return new Response(tcpResp.body, { status: tcpResp.status, headers: h });
+                errors.push(name + ':tcp_' + tcpResp.status);
               }
-              errors.push(base + ':tcp_' + tcpResp.status);
+            } catch (e) {
+              if (attempt === 0) continue;
+              errors.push(name + ':tcp_err');
             }
-          } catch (e) {
-            errors.push(base + ':' + (attempt === 0 ? 'fetch_err:' : 'tcp_err:') + e.message);
-            if (attempt === 0) continue; // try TCP
           }
         }
+        return new Response(JSON.stringify({ status: 'error', error: { code: 'all_failed', detail: errors.join(' | ') } }), {
+          status: 502, headers: { 'Content-Type': 'application/json', ...CORS },
+        });
       }
 
-      return new Response(JSON.stringify({
-        status: 'error',
-        error: { code: 'all_failed', detail: errors.join(' | ') },
-      }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS } });
+      /* ── Status reporting mode: JSON lines → ---STREAM--- → video bytes ── */
+      const { readable, writable } = new TransformStream();
+      const writer = writable.getWriter();
+
+      const sendLine = (obj) => writer.write(enc.encode(JSON.stringify(obj) + '\n'));
+
+      (async () => {
+        try {
+          for (const base of shuffled) {
+            const name = base.replace(/^https?:\/\//, '').replace(/\/$/, '');
+            await sendLine({ instance: name, status: 'trying' });
+
+            const cobaltResult = await tryCobalt(base, body, 12000);
+            if (!cobaltResult.ok) {
+              await sendLine({ instance: name, status: 'fail', detail: 'cobalt_error' });
+              continue;
+            }
+            let data;
+            try { data = JSON.parse(cobaltResult.text); } catch {
+              await sendLine({ instance: name, status: 'fail', detail: 'bad_json' });
+              continue;
+            }
+            if (data.status === 'error' || !data.url) {
+              const code = data.error?.code || 'no_url';
+              await sendLine({ instance: name, status: 'fail', detail: code });
+              continue;
+            }
+
+            for (let attempt = 0; attempt < 2; attempt++) {
+              const method = attempt === 0 ? 'fetch' : 'tcp';
+              try {
+                if (attempt === 0) {
+                  const upstream = await fetch(data.url, { headers: fetchHeaders, redirect: 'follow' });
+                  if (upstream.ok || upstream.status === 206) {
+                    let cl = upstream.headers.get('Content-Length');
+                    if (!cl) cl = upstream.headers.get('Estimated-Content-Length');
+                    const fn = data.filename || 'video.mp4';
+                    await sendLine({ instance: name, status: 'ok', method, filename: fn, size: cl ? +cl : 0 });
+                    await writer.write(enc.encode('---STREAM---\n'));
+                    const reader = upstream.body.getReader();
+                    while (true) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      await writer.write(value);
+                    }
+                    await writer.close();
+                    return;
+                  }
+                  if (upstream.status === 403) continue;
+                  await sendLine({ instance: name, status: 'fail', detail: method + '_' + upstream.status });
+                  break;
+                } else {
+                  const tcpResp = await fetchViaTcp(data.url);
+                  if (tcpResp.status === 200 || tcpResp.status === 206) {
+                    let cl = tcpResp.headers['content-length'] || tcpResp.headers['estimated-content-length'];
+                    const fn = data.filename || 'video.mp4';
+                    await sendLine({ instance: name, status: 'ok', method, filename: fn, size: cl ? +cl : 0 });
+                    await writer.write(enc.encode('---STREAM---\n'));
+                    const reader = tcpResp.body.getReader();
+                    while (true) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      await writer.write(value);
+                    }
+                    await writer.close();
+                    return;
+                  }
+                  await sendLine({ instance: name, status: 'fail', detail: method + '_' + tcpResp.status });
+                }
+              } catch (e) {
+                if (attempt === 0) continue;
+                await sendLine({ instance: name, status: 'fail', detail: method + '_err' });
+              }
+            }
+          }
+          await sendLine({ status: 'error', detail: 'all_failed' });
+          await writer.close();
+        } catch (e) {
+          try {
+            await sendLine({ status: 'error', detail: e.message });
+            await writer.close();
+          } catch {}
+        }
+      })();
+
+      return new Response(readable, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Cache-Control': 'no-cache',
+          ...CORS,
+        },
+      });
     }
 
     /* GET / — health check */
