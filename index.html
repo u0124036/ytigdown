@@ -129,6 +129,11 @@ body{
 .status-log .sl-item.trying{color:#888}
 .status-log .sl-item.ok{color:#30d158}
 .status-log .sl-item.fail{color:#ff6b6b}
+.toast-container{position:fixed;bottom:calc(var(--sb) + 16px);left:16px;right:16px;z-index:9999;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none}
+.toast{max-width:460px;width:100%;background:var(--s2);border:1px solid rgba(255,59,48,.3);border-radius:12px;padding:13px 38px 13px 15px;color:#ff6b6b;font-size:14px;line-height:1.5;position:relative;pointer-events:auto;transform:translateY(100px);opacity:0;animation:toastIn .3s ease forwards;touch-action:pan-x;-webkit-user-select:none;user-select:none}
+.toast a{display:inline-block;margin-top:8px;color:#5ac8fa;font-size:13px;text-decoration:underline}
+.toast .tc{position:absolute;top:8px;right:8px;background:none;border:none;color:#888;font-size:18px;cursor:pointer;padding:4px;line-height:1;-webkit-tap-highlight-color:transparent}
+@keyframes toastIn{to{transform:translateY(0);opacity:1}}
 body{-webkit-user-select:none;user-select:none}
 textarea,input{-webkit-user-select:text;user-select:text}
 .vp video{-webkit-touch-callout:default}
@@ -171,8 +176,6 @@ textarea,input{-webkit-user-select:text;user-select:text}
     <span id="loadTxt">正在取得影片資訊…</span>
   </div>
 
-  <div id="err" class="err hidden"></div>
-
   <div id="result" class="hidden">
     <div class="card" id="card">
       <div class="thumb">
@@ -211,7 +214,7 @@ textarea,input{-webkit-user-select:text;user-select:text}
     <div id="ok" class="ok hidden">✓ <span id="okTxt"></span></div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v21</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v22</div>
 </div>
 
 <script>
@@ -330,28 +333,38 @@ $('btnSavePhotos').onclick = () => saveToPhotos();
 $('btnSaveFiles').onclick = () => saveToFiles();
 
 function reset(){
-  ['result','err','prog','vp','ok','picker','saveActions','statusLog'].forEach(id=>$(id).classList.add('hidden'));
+  ['result','prog','vp','ok','picker','saveActions','statusLog'].forEach(id=>$(id).classList.add('hidden'));
+  document.querySelectorAll('.toast').forEach(t=>t.remove());
   $('pb').style.width='0%';
   $('statusLog').innerHTML='';
   state={url:'',cobaltUrl:'',quality:'max',isPicker:false,videoFile:null,sharing:false,blobUrl:null,downloading:false};
 }
 
+function showToast(msg, linkUrl){
+  let ct=document.getElementById('toastContainer');
+  if(!ct){ct=document.createElement('div');ct.id='toastContainer';ct.className='toast-container';document.body.appendChild(ct);}
+  const t=document.createElement('div');t.className='toast';
+  const txt=document.createElement('div');txt.textContent=msg;t.appendChild(txt);
+  if(linkUrl){const a=document.createElement('a');a.href=linkUrl;a.target='_blank';a.rel='noopener';a.textContent='👉 改用備用網站開啟';t.appendChild(a);}
+  const cb=document.createElement('button');cb.className='tc';cb.textContent='✕';cb.onclick=()=>dismiss();t.appendChild(cb);
+  t.addEventListener('animationend',()=>{t.style.animation='none';t.style.transform='translateY(0)';},{once:true});
+  let sx=0,cx=0;
+  t.ontouchstart=e=>{sx=cx=e.touches[0].clientX;};
+  t.ontouchmove=e=>{cx=e.touches[0].clientX;const dx=cx-sx;t.style.transform='translateX('+dx+'px)';t.style.opacity=String(Math.max(0,1-Math.abs(dx)/200));};
+  t.ontouchend=()=>{if(Math.abs(cx-sx)>80)dismiss();else{t.style.transform='translateY(0)';t.style.opacity='1';}};
+  ct.appendChild(t);
+  const tm=setTimeout(()=>dismiss(),6000);
+  function dismiss(){clearTimeout(tm);const dir=(cx-sx)>=0?1:-1;t.style.transition='transform .25s ease,opacity .25s ease';t.style.transform='translateX('+(dir*120)+'px)';t.style.opacity='0';setTimeout(()=>t.remove(),300);}
+}
+
 function showErr(msg){
-  $('err').innerHTML = '';
-  const p = document.createElement('div');
-  p.textContent = msg;
-  $('err').appendChild(p);
+  let linkUrl=null;
   if(state.url){
-    const a = document.createElement('a');
-    const target = /instagram\.com/i.test(state.url)
-      ? 'https://saveclip.app/en?url=' + encodeURIComponent(state.url)
-      : 'https://en1.savefrom.net/1-youtube-video-downloader/#url=' + encodeURIComponent(state.url);
-    a.href = target; a.target = '_blank'; a.rel = 'noopener';
-    a.style.cssText = 'display:inline-block;margin-top:10px;color:#5ac8fa;font-size:13px;text-decoration:underline';
-    a.textContent = '👉 改用備用網站開啟';
-    $('err').appendChild(a);
+    linkUrl=/instagram\.com/i.test(state.url)
+      ? 'https://saveclip.app/en?url='+encodeURIComponent(state.url)
+      : 'https://en1.savefrom.net/1-youtube-video-downloader/#url='+encodeURIComponent(state.url);
   }
-  $('err').classList.remove('hidden');
+  showToast(msg, linkUrl);
   $('loading').classList.add('hidden');
 }
 
@@ -402,8 +415,6 @@ function showYTCard(url){
   $('thumb').style.display='none';
   if(m){
     const img=$('thumb');
-    img.crossOrigin='anonymous';
-    img.referrerPolicy='no-referrer';
     img.src='https://i.ytimg.com/vi/'+m[1]+'/mqdefault.jpg';
     img.style.display='block';
     img.onerror=()=>{
@@ -495,7 +506,13 @@ async function download(){
   await streamAndSave(proxify(state.cobaltUrl));
 }
 
-/* YouTube download with status reporting */
+function indexOfBytes(buf,pat){
+  const pl=pat.length;
+  outer:for(let i=0;i<=buf.length-pl;i++){for(let j=0;j<pl;j++) if(buf[i+j]!==pat[j]) continue outer;return i;}
+  return -1;
+}
+
+/* YouTube download with status reporting (binary-safe) */
 async function downloadYTWithStatus(){
   $('ok').classList.add('hidden');
   $('saveActions').classList.add('hidden');
@@ -505,6 +522,14 @@ async function downloadYTWithStatus(){
   $('prog').classList.remove('hidden');
   $('pb').style.width='0%';
   $('progLbl').textContent='尋找可用伺服器…';
+  let totalSize=0, filename='video.mp4';
+  function parseLine(line){
+    if(!line.trim()) return;
+    try{const ev=JSON.parse(line);updateStatusLog(ev);
+      if(ev.status==='ok'){totalSize=ev.size||0;if(ev.filename) filename=ev.filename;}
+      if(ev.status==='error') throw new Error(ev.detail||'all_failed');
+    }catch(e){if(e.message==='all_failed') throw e;}
+  }
 
   try{
     const r = await fetchWithTimeout(DOWNLOAD_ENDPOINT, {
@@ -515,53 +540,38 @@ async function downloadYTWithStatus(){
 
     const reader = r.body.getReader();
     const dec = new TextDecoder();
-    let lineBuf = '';
+    const DELIM = new TextEncoder().encode('---STREAM---\n');
     let streamStarted = false;
     const chunks = [];
     let received = 0;
-    let totalSize = 0;
-    let filename = 'video.mp4';
+    let rawBuf = new Uint8Array(0);
 
     while(true){
       const {done, value} = await reader.read();
       if(done) break;
 
       if(!streamStarted){
-        // Parse status lines
-        lineBuf += dec.decode(value, {stream:true});
-        const parts = lineBuf.split('\n');
-        lineBuf = parts.pop(); // keep incomplete line
-        for(const line of parts){
-          if(line === '---STREAM---'){
-            streamStarted = true;
-            $('progLbl').textContent = '下載中… 0 MB';
-            // Any remaining data in lineBuf is video bytes
-            if(lineBuf.length > 0){
-              const leftover = new TextEncoder().encode(lineBuf);
-              chunks.push(leftover);
-              received += leftover.length;
-            }
-            lineBuf = '';
-            break;
-          }
-          if(!line.trim()) continue;
-          try{
-            const ev = JSON.parse(line);
-            updateStatusLog(ev);
-            if(ev.status === 'ok'){
-              totalSize = ev.size || 0;
-              if(ev.filename) filename = ev.filename;
-            }
-            if(ev.status === 'error'){
-              throw new Error(ev.detail || 'all_failed');
-            }
-          }catch(e){
-            if(e.message && e.message !== 'all_failed' && !e.message.includes('JSON')) continue;
-            throw e;
+        // Accumulate raw bytes — never decode binary as text
+        const merged = new Uint8Array(rawBuf.length + value.length);
+        merged.set(rawBuf); merged.set(value, rawBuf.length);
+        rawBuf = merged;
+        // Search for delimiter in raw bytes
+        const di = indexOfBytes(rawBuf, DELIM);
+        if(di >= 0){
+          for(const line of dec.decode(rawBuf.slice(0,di)).split('\n')) parseLine(line);
+          const after = rawBuf.slice(di + DELIM.length);
+          if(after.length > 0){ chunks.push(after); received += after.length; }
+          streamStarted = true; rawBuf = null;
+          $('progLbl').textContent = '下載中… 0 MB';
+        } else {
+          let lastNl = -1;
+          for(let i=rawBuf.length-1;i>=0;i--) if(rawBuf[i]===0x0A){lastNl=i;break;}
+          if(lastNl >= 0){
+            for(const line of dec.decode(rawBuf.slice(0,lastNl)).split('\n')) parseLine(line);
+            rawBuf = rawBuf.slice(lastNl + 1);
           }
         }
       } else {
-        // Video stream bytes
         chunks.push(value);
         received += value.length;
         if(totalSize > 0){
@@ -569,7 +579,6 @@ async function downloadYTWithStatus(){
           $('pb').style.width = pct + '%';
           $('progLbl').textContent = '下載中… ' + pct + '% (' + (received>>20) + ' MB)';
         } else {
-          // No total size: show MB only, advance bar slowly
           const fakePct = Math.min(90, Math.round(Math.sqrt(received / 1048576) * 15));
           $('pb').style.width = fakePct + '%';
           $('progLbl').textContent = '下載中… ' + (received>>20) + ' MB';
@@ -577,7 +586,11 @@ async function downloadYTWithStatus(){
       }
     }
 
-    if(!streamStarted || chunks.length === 0){
+    if(!streamStarted){
+      if(rawBuf && rawBuf.length > 0){
+        const lines=dec.decode(rawBuf).split('\n').filter(l=>l.trim());
+        for(const line of lines) parseLine(line);
+      }
       throw new Error('伺服器未回傳影片資料');
     }
 
@@ -639,7 +652,7 @@ function downloadYTDirect(){
 }
 
 /* IG / generic stream download */
-async function streamAndSave(url){
+async function streamAndSave(url){、
   $('ok').classList.add('hidden');
   $('saveActions').classList.add('hidden');
   $('prog').classList.remove('hidden');
@@ -694,19 +707,26 @@ async function saveToPhotos(){
   const file = state.videoFile;
   if(!file){ showErr('請先等待下載完成'); return; }
   if(state.sharing) return;
-  if(navigator.canShare && navigator.canShare({files:[file]})){
-    try{
-      state.sharing=true;
-      await navigator.share({files:[file]});
-      $('ok').classList.remove('hidden');
-      $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
-    }catch(e){
-      if(e && e.name==='AbortError') return;
-      showErr('分享失敗：'+e.message);
-    }finally{ state.sharing=false; }
-  } else {
-    showErr('此裝置不支援分享功能，請使用「儲存到檔案」');
+  if(!navigator.canShare || !navigator.canShare({files:[file]})){
+    showErr('此裝置不支援分享功能，請使用「儲存到檔案」'); return;
   }
+  state.sharing=true;
+  try{
+    for(let retry=0;retry<3;retry++){
+      try{
+        if(retry>0) await new Promise(r=>setTimeout(r,400));
+        await navigator.share({files:[file]});
+        $('ok').classList.remove('hidden');
+        $('okTxt').textContent='已開啟分享單，點「儲存影片」存入相簿';
+        return;
+      }catch(e){
+        if(e && e.name==='AbortError') return;
+        if(e && e.name==='InvalidStateError' && retry<2) continue;
+        showErr('分享失敗：'+e.message);
+        return;
+      }
+    }
+  }finally{ state.sharing=false; }
 }
 
 function saveToFiles(){
