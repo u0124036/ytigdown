@@ -1,6 +1,6 @@
 import { connect } from 'cloudflare:sockets';
 
-const COBALT = [
+const PUBLIC_COBALT_FALLBACKS = [
   'https://co.ggtyler.dev/',
   'https://dwnld.nichind.dev/',
   'https://cobalt-backend.canine.tools/',
@@ -13,41 +13,180 @@ const COBALT = [
   'https://api.cobalt.tools/',
 ];
 
+const DEFAULT_COBALT_PAYLOAD = {
+  filenameStyle: 'basic',
+  downloadMode: 'auto',
+  youtubeVideoCodec: 'h264',
+  youtubeVideoContainer: 'mp4',
+  localProcessing: 'disabled',
+};
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
-  'Access-Control-Allow-Headers': 'Content-Type, Accept, Range',
+  'Access-Control-Allow-Headers': 'Content-Type, Accept, Range, Authorization',
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition',
 };
 
-async function tryCobalt(base, body, timeoutMs) {
+function splitList(value) {
+  return String(value || '')
+    .split(',')
+    .map(v => v.trim())
+    .filter(Boolean);
+}
+
+function normalizeBase(base) {
+  return base.endsWith('/') ? base : base + '/';
+}
+
+function providerName(provider) {
+  return provider.base.replace(/^https?:\/\//, '').replace(/\/$/, '');
+}
+
+function buildAuthHeader(env) {
+  if (env?.COBALT_AUTH_HEADER) return env.COBALT_AUTH_HEADER;
+  if (env?.COBALT_API_KEY) return 'Api-Key ' + env.COBALT_API_KEY;
+  if (env?.COBALT_BEARER_TOKEN) return 'Bearer ' + env.COBALT_BEARER_TOKEN;
+  return '';
+}
+
+function getCobaltProviders(env) {
+  const custom = [
+    ...splitList(env?.COBALT_PRIMARY),
+    ...splitList(env?.COBALT_INSTANCES),
+  ];
+  const authHeader = buildAuthHeader(env);
+  const customProviders = custom.map(base => ({
+    base: normalizeBase(base),
+    authHeader,
+    tier: 'primary',
+  }));
+
+  const includePublic = env?.DISABLE_PUBLIC_COBALT_FALLBACKS !== '1';
+  const fallbackProviders = includePublic
+    ? PUBLIC_COBALT_FALLBACKS.map(base => ({
+        base: normalizeBase(base),
+        authHeader: '',
+        tier: 'public-fallback',
+      }))
+    : [];
+
+  const seen = new Set();
+  return [...customProviders, ...fallbackProviders].filter(provider => {
+    if (seen.has(provider.base)) return false;
+    seen.add(provider.base);
+    return true;
+  });
+}
+
+function buildCobaltBody(body) {
+  return { ...DEFAULT_COBALT_PAYLOAD, ...body };
+}
+
+function buildCobaltHeaders(provider) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+  if (provider.authHeader) headers.Authorization = provider.authHeader;
+  return headers;
+}
+
+async function tryCobalt(provider, body, timeoutMs) {
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const r = await fetch(base, {
+    const r = await fetch(provider.base, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify(body),
+      headers: buildCobaltHeaders(provider),
+      body: JSON.stringify(buildCobaltBody(body)),
       signal: ctrl.signal,
     });
     const text = await r.text();
-    return { base, ok: r.ok, status: r.status, text };
+    return { ...provider, ok: r.ok, status: r.status, text };
   } catch (e) {
-    return { base, ok: false, status: 0, error: e.name + ':' + (e.message || 'fail') };
+    return { ...provider, ok: false, status: 0, error: e.name + ':' + (e.message || 'fail') };
   } finally {
     clearTimeout(tid);
   }
 }
 
-async function getCobaltUrl(body) {
-  const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 15000)));
-  const isValid = r => {
-    if (!r.ok) return false;
-    try { return JSON.parse(r.text).status !== 'error'; } catch { return false; }
-  };
-  const winner = results.find(r => isValid(r));
-  if (!winner) return null;
-  try { return JSON.parse(winner.text); } catch { return null; }
+function parseCobaltResult(result) {
+  if (!result.ok) return { ok: false, code: 'HTTP' + result.status };
+  try {
+    const data = JSON.parse(result.text);
+    if (data.status === 'error') {
+      return { ok: false, code: data.error?.code || 'error', data };
+    }
+    if (data.status === 'local-processing') {
+      return { ok: false, code: 'local_processing_unsupported', data };
+    }
+    return { ok: true, data };
+  } catch {
+    return { ok: false, code: 'bad_json' };
+  }
+}
+
+function shufflePublicProviders(providers) {
+  const primary = providers.filter(p => p.tier === 'primary');
+  const fallback = providers.filter(p => p.tier !== 'primary').sort(() => Math.random() - 0.5);
+  return [...primary, ...fallback];
+}
+
+async function getFirstCobaltResult(providers, body, timeoutMs) {
+  const primary = providers.filter(p => p.tier === 'primary');
+  const fallback = providers.filter(p => p.tier !== 'primary');
+  const batches = primary.length ? [primary, fallback] : [fallback];
+  const diagnostics = [];
+
+  for (const batch of batches) {
+    if (!batch.length) continue;
+    const results = await Promise.all(batch.map(provider => tryCobalt(provider, body, timeoutMs)));
+    for (const result of results) {
+      const parsed = parseCobaltResult(result);
+      if (parsed.ok) return { result, data: parsed.data, diagnostics };
+      diagnostics.push({ provider: providerName(result), tier: result.tier, code: result.error || parsed.code });
+    }
+  }
+
+  return { result: null, data: null, diagnostics };
+}
+
+async function checkCobaltHealth(provider, timeoutMs) {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(provider.base, {
+      method: 'GET',
+      headers: provider.authHeader ? { Authorization: provider.authHeader } : {},
+      signal: ctrl.signal,
+    });
+    let version = '';
+    let services = [];
+    try {
+      const data = await r.json();
+      version = data.cobalt?.version || '';
+      services = Array.isArray(data.cobalt?.services) ? data.cobalt.services : [];
+    } catch {}
+    return {
+      provider: providerName(provider),
+      tier: provider.tier,
+      ok: r.ok,
+      status: r.status,
+      version,
+      services,
+    };
+  } catch (e) {
+    return {
+      provider: providerName(provider),
+      tier: provider.tier,
+      ok: false,
+      status: 0,
+      error: e.name + ':' + (e.message || 'fail'),
+    };
+  } finally {
+    clearTimeout(tid);
+  }
 }
 
 /* ── TCP-based tunnel fetch (may share egress IP with fetch) ── */
@@ -102,10 +241,6 @@ async function fetchViaTcp(tunnelUrl) {
   const bodyStart = headerEnd + 4;
   const leftover = headerBuf.slice(bodyStart);
 
-  // Stream the remaining body using a single reader
-  const isChunked = (respHeaders['transfer-encoding'] || '').toLowerCase().includes('chunked');
-
-  // For non-chunked (HTTP/1.0 or Content-Length), just pipe raw bytes
   const bodyStream = new ReadableStream({
     start(controller) {
       if (leftover.length > 0) controller.enqueue(leftover);
@@ -165,12 +300,13 @@ async function proxyStream(req, url) {
 /* ── main handler ── */
 
 export default {
-  async fetch(req) {
+  async fetch(req, env) {
     if (req.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS });
     }
 
     const u = new URL(req.url);
+    const providers = getCobaltProviders(env);
 
     /* /proxy?u=  — simple proxy for non-tunnel URLs (IG CDN etc.) */
     if (u.pathname === '/proxy') {
@@ -218,17 +354,20 @@ export default {
       if (range) fetchHeaders['Range'] = range;
 
       const enc = new TextEncoder();
-      const shuffled = [...COBALT].sort(() => Math.random() - 0.5);
+      const orderedProviders = shufflePublicProviders(providers);
 
       /* ── Direct mode: stream video bytes directly (for desktop form POST) ── */
       if (direct) {
         const errors = [];
-        for (const base of shuffled) {
-          const name = base.replace(/^https?:\/\//, '').replace(/\/$/, '');
-          const cobaltResult = await tryCobalt(base, body, 12000);
+        for (const provider of orderedProviders) {
+          const name = providerName(provider);
+          const cobaltResult = await tryCobalt(provider, body, 12000);
           if (!cobaltResult.ok) { errors.push(name + ':cobalt_fail'); continue; }
           let data;
           try { data = JSON.parse(cobaltResult.text); } catch { errors.push(name + ':bad_json'); continue; }
+          if (data.status === 'local-processing') {
+            errors.push(name + ':local_processing_unsupported'); continue;
+          }
           if (data.status === 'error' || !data.url) {
             errors.push(name + ':' + (data.error?.code || 'no_url')); continue;
           }
@@ -277,11 +416,11 @@ export default {
 
       (async () => {
         try {
-          for (const base of shuffled) {
-            const name = base.replace(/^https?:\/\//, '').replace(/\/$/, '');
-            await sendLine({ instance: name, status: 'trying' });
+          for (const provider of orderedProviders) {
+            const name = providerName(provider);
+            await sendLine({ instance: name, tier: provider.tier, status: 'trying' });
 
-            const cobaltResult = await tryCobalt(base, body, 12000);
+            const cobaltResult = await tryCobalt(provider, body, 12000);
             if (!cobaltResult.ok) {
               await sendLine({ instance: name, status: 'fail', detail: 'cobalt_error' });
               continue;
@@ -289,6 +428,10 @@ export default {
             let data;
             try { data = JSON.parse(cobaltResult.text); } catch {
               await sendLine({ instance: name, status: 'fail', detail: 'bad_json' });
+              continue;
+            }
+            if (data.status === 'local-processing') {
+              await sendLine({ instance: name, status: 'fail', detail: 'local_processing_unsupported' });
               continue;
             }
             if (data.status === 'error' || !data.url) {
@@ -364,9 +507,24 @@ export default {
       });
     }
 
+    if (u.pathname === '/health') {
+      const checks = await Promise.all(providers.map(provider => checkCobaltHealth(provider, 6000)));
+      return new Response(JSON.stringify({
+        status: checks.some(c => c.ok) ? 'ok' : 'error',
+        primaryConfigured: providers.some(p => p.tier === 'primary'),
+        providers: checks,
+      }), {
+        headers: { 'Content-Type': 'application/json', ...CORS },
+      });
+    }
+
     /* GET / — health check */
     if (req.method === 'GET') {
-      return new Response(JSON.stringify({ status: 'ok', instances: COBALT.length }), {
+      return new Response(JSON.stringify({
+        status: 'ok',
+        primaryConfigured: providers.some(p => p.tier === 'primary'),
+        instances: providers.length,
+      }), {
         headers: { 'Content-Type': 'application/json', ...CORS },
       });
     }
@@ -379,25 +537,16 @@ export default {
       });
     }
 
-    const results = await Promise.all(COBALT.map(base => tryCobalt(base, body, 15000)));
-    const isValid = r => {
-      if (!r.ok) return false;
-      try { return JSON.parse(r.text).status !== 'error'; } catch { return false; }
-    };
-    const winner = results.find(r => isValid(r));
-    if (winner) {
-      return new Response(winner.text, {
+    const winner = await getFirstCobaltResult(providers, body, 15000);
+    if (winner.data) {
+      return new Response(JSON.stringify(winner.data), {
         headers: { 'Content-Type': 'application/json', ...CORS },
       });
     }
 
-    const detail = results.map(r => {
-      const name = r.base.replace(/^https?:\/\//, '').replace(/\/$/, '');
-      if (r.error) return `${name}=${r.error}`;
-      let code = 'HTTP' + r.status;
-      try { const j = JSON.parse(r.text); if (j.error && j.error.code) code = j.error.code; } catch {}
-      return `${name}=${code}`;
-    }).join(' | ');
+    const detail = winner.diagnostics
+      .map(d => `${d.provider}=${d.code}`)
+      .join(' | ');
 
     return new Response(JSON.stringify({
       status: 'error',

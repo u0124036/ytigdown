@@ -231,6 +231,7 @@ const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
 const API_ENDPOINT = 'https://video-api.s0937854008.workers.dev/';
 const PROXY_ENDPOINT = 'https://video-api.s0937854008.workers.dev/proxy?u=';
 const DOWNLOAD_ENDPOINT = 'https://video-api.s0937854008.workers.dev/download';
+const HEALTH_ENDPOINT = 'https://video-api.s0937854008.workers.dev/health';
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 const proxify = u => PROXY_ENDPOINT + encodeURIComponent(u);
 
@@ -244,13 +245,22 @@ function fetchWithTimeout(url, opts, ms){
 setTimeout(function(){
   const el = document.getElementById('workerStatus');
   if(!el) return;
-  fetchWithTimeout(API_ENDPOINT, {method:'GET'}, 8000)
+  fetchWithTimeout(HEALTH_ENDPOINT, {method:'GET'}, 10000)
     .then(function(r){
-      if(r.ok || r.status < 500){
-        el.textContent = '✅ Worker 已連線 (' + r.status + ')';
-        el.style.color = '#30d158';
+      return r.json().then(function(data){return {status:r.status, data:data};});
+    })
+    .then(function(res){
+      const providers = Array.isArray(res.data.providers) ? res.data.providers : [];
+      const online = providers.filter(function(p){return p.ok;}).length;
+      const primary = !!res.data.primaryConfigured;
+      if(res.status < 500 && online > 0){
+        el.textContent = (primary ? '✅ 主下載通道已連線' : '⚠️ 使用公開備援通道') + ' (' + online + '/' + providers.length + ')';
+        el.style.color = primary ? '#30d158' : '#ffd60a';
+      } else if(res.status < 500){
+        el.textContent = '⚠️ Worker 可連線，但下載通道皆無回應';
+        el.style.color = '#ffd60a';
       } else {
-        el.textContent = '⚠️ Worker 回應 HTTP ' + r.status;
+        el.textContent = '⚠️ Worker 回應 HTTP ' + res.status;
         el.style.color = '#ffd60a';
       }
     })
