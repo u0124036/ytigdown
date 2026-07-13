@@ -28,6 +28,16 @@ const CORS = {
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition',
 };
 
+const IMAGE_EXT_RE = /\.(jpe?g|png|gif|webp|avif)(?:$|[?#])/i;
+const TEXT_EXT_RE = /\.(html?|json|txt|xml)(?:$|[?#])/i;
+
+function jsonResponse(data, init = {}) {
+  return new Response(JSON.stringify(data), {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...CORS, ...(init.headers || {}) },
+  });
+}
+
 function splitList(value) {
   return String(value || '')
     .split(',')
@@ -41,6 +51,108 @@ function normalizeBase(base) {
 
 function providerName(provider) {
   return provider.base.replace(/^https?:\/\//, '').replace(/\/$/, '');
+}
+
+function sanitizeFilename(filename) {
+  return String(filename || 'video.mp4')
+    .replace(/[\\/\r\n"]/g, '')
+    .trim()
+    .slice(0, 160) || 'video.mp4';
+}
+
+function getHeader(headers, name) {
+  if (!headers) return '';
+  if (typeof headers.get === 'function') return headers.get(name) || '';
+  return headers[name.toLowerCase()] || '';
+}
+
+function parseInputUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function validateRequestBody(body) {
+  const parsed = parseInputUrl(body?.url);
+  if (!parsed) return 'bad_url';
+  if (!/(^|\.)youtube\.com$|(^|\.)youtu\.be$|(^|\.)instagram\.com$/i.test(parsed.hostname)) {
+    return 'unsupported_url';
+  }
+  return '';
+}
+
+function detectContentKind(headers, firstChunk, filename) {
+  const ct = getHeader(headers, 'Content-Type').toLowerCase();
+  if (IMAGE_EXT_RE.test(filename || '') || ct.startsWith('image/')) return 'image';
+  if (TEXT_EXT_RE.test(filename || '') || /text\/|application\/json|application\/xml|text\/html/.test(ct)) return 'text';
+  if (firstChunk?.length >= 12) {
+    const b = firstChunk;
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image';
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image';
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image';
+    if (b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) return 'video';
+  }
+  if (ct.startsWith('video/') || ct === 'application/octet-stream') return 'video';
+  return 'unknown';
+}
+
+function copyStreamHeaders(sourceHeaders, filename) {
+  const h = new Headers();
+  const passthrough = [
+    'Content-Type',
+    'Content-Length',
+    'Content-Range',
+    'Accept-Ranges',
+    'Last-Modified',
+    'ETag',
+  ];
+  for (const key of passthrough) {
+    const value = getHeader(sourceHeaders, key);
+    if (value) h.set(key, value);
+  }
+  const est = getHeader(sourceHeaders, 'Estimated-Content-Length');
+  if (!h.has('Content-Length') && est) h.set('Content-Length', est);
+  if (!h.has('Content-Type')) h.set('Content-Type', 'video/mp4');
+  h.set('Content-Disposition', 'attachment; filename="' + sanitizeFilename(filename) + '"');
+  for (const [k, v] of Object.entries(CORS)) h.set(k, v);
+  return h;
+}
+
+async function checkedVideoResponse(source, filename, status = 200) {
+  const reader = source.body?.getReader();
+  if (!reader) throw new Error('empty_body');
+  const first = await reader.read();
+  const firstChunk = first.done ? new Uint8Array(0) : first.value;
+  const kind = detectContentKind(source.headers, firstChunk, filename);
+  if (kind === 'image') throw new Error('not_video:image');
+  if (kind === 'text') throw new Error('not_video:text');
+
+  const body = new ReadableStream({
+    start(controller) {
+      if (firstChunk.length > 0) controller.enqueue(firstChunk);
+      if (first.done) controller.close();
+    },
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(value);
+    },
+    cancel() {
+      reader.cancel().catch(() => {});
+    },
+  });
+
+  return new Response(body, {
+    status,
+    headers: copyStreamHeaders(source.headers, filename),
+  });
 }
 
 function buildAuthHeader(env) {
@@ -193,13 +305,19 @@ async function checkCobaltHealth(provider, timeoutMs) {
 
 async function fetchViaTcp(tunnelUrl) {
   const parsed = new URL(tunnelUrl);
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('tcp_bad_protocol');
   const host = parsed.hostname;
-  const port = parseInt(parsed.port || '80');
+  const port = parseInt(parsed.port || (parsed.protocol === 'https:' ? '443' : '80'));
   const path = parsed.pathname + parsed.search;
 
-  const socket = connect({ hostname: host, port });
+  const socket = connect({
+    hostname: host,
+    port,
+    secureTransport: parsed.protocol === 'https:' ? 'on' : 'off',
+  });
   const writer = socket.writable.getWriter();
-  const reqLine = `GET ${path} HTTP/1.0\r\nHost: ${host}:${port}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
+  const hostHeader = parsed.port ? `${host}:${port}` : host;
+  const reqLine = `GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
   await writer.write(new TextEncoder().encode(reqLine));
   writer.releaseLock();
 
@@ -284,17 +402,28 @@ function buildStreamHeaders(upstream) {
 }
 
 async function proxyStream(req, url) {
+  const target = parseInputUrl(url);
+  if (!target) {
+    return jsonResponse({ error: 'bad_proxy_url' }, { status: 400 });
+  }
+  const currentHost = new URL(req.url).hostname;
+  if (target.hostname !== currentHost && target.hostname !== '127.0.0.1' && target.hostname !== 'localhost') {
+    return jsonResponse({ error: 'proxy_disabled' }, { status: 403 });
+  }
   const range = req.headers.get('Range');
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Accept': '*/*',
   };
   if (range) headers['Range'] = range;
-  const upstream = await fetch(url, { headers, redirect: 'follow' });
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: buildStreamHeaders(upstream),
-  });
+  const upstream = await fetch(target.href, { headers, redirect: 'follow' });
+  if (!(upstream.ok || upstream.status === 206)) {
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: buildStreamHeaders(upstream),
+    });
+  }
+  return checkedVideoResponse(upstream, 'video.mp4', upstream.status);
 }
 
 /* ── main handler ── */
@@ -308,7 +437,7 @@ export default {
     const u = new URL(req.url);
     const providers = getCobaltProviders(env);
 
-    /* /proxy?u=  — simple proxy for non-tunnel URLs (IG CDN etc.) */
+    /* /proxy is kept only for same-host/local compatibility, not as a public URL proxy. */
     if (u.pathname === '/proxy') {
       const target = u.searchParams.get('u');
       if (!target) {
@@ -345,6 +474,8 @@ export default {
           });
         }
       }
+      const bodyError = validateRequestBody(body);
+      if (bodyError) return jsonResponse({ status: 'error', error: { code: bodyError } }, { status: 400 });
 
       const range = req.headers.get('Range');
       const fetchHeaders = {
@@ -378,26 +509,23 @@ export default {
               if (attempt === 0) {
                 const upstream = await fetch(data.url, { headers: fetchHeaders, redirect: 'follow' });
                 if (upstream.ok || upstream.status === 206) {
-                  const h = buildStreamHeaders(upstream);
-                  h.set('Content-Disposition', 'attachment; filename="' + fn.replace(/"/g, '') + '"');
-                  return new Response(upstream.body, { status: upstream.status, headers: h });
+                  return await checkedVideoResponse(upstream, fn, upstream.status);
                 }
                 if (upstream.status === 403) continue;
-                errors.push(name + ':fetch_' + upstream.status); break;
+                errors.push(name + ':fetch_' + upstream.status);
+                break;
               } else {
                 const tcpResp = await fetchViaTcp(data.url);
                 if (tcpResp.status === 200 || tcpResp.status === 206) {
-                  const h = new Headers();
-                  h.set('Content-Type', 'video/mp4');
-                  h.set('Content-Disposition', 'attachment; filename="' + fn.replace(/"/g, '') + '"');
-                  if (tcpResp.headers['content-length']) h.set('Content-Length', tcpResp.headers['content-length']);
-                  if (tcpResp.headers['estimated-content-length']) h.set('Content-Length', tcpResp.headers['estimated-content-length']);
-                  for (const [k, v] of Object.entries(CORS)) h.set(k, v);
-                  return new Response(tcpResp.body, { status: tcpResp.status, headers: h });
+                  return await checkedVideoResponse(tcpResp, fn, tcpResp.status);
                 }
                 errors.push(name + ':tcp_' + tcpResp.status);
               }
             } catch (e) {
+              if (String(e.message || '').startsWith('not_video:')) {
+                errors.push(name + ':' + e.message);
+                break;
+              }
               if (attempt === 0) continue;
               errors.push(name + ':tcp_err');
             }
@@ -446,12 +574,12 @@ export default {
                 if (attempt === 0) {
                   const upstream = await fetch(data.url, { headers: fetchHeaders, redirect: 'follow' });
                   if (upstream.ok || upstream.status === 206) {
-                    let cl = upstream.headers.get('Content-Length');
-                    if (!cl) cl = upstream.headers.get('Estimated-Content-Length');
                     const fn = data.filename || 'video.mp4';
+                    const videoResp = await checkedVideoResponse(upstream, fn, upstream.status);
+                    const cl = videoResp.headers.get('Content-Length');
                     await sendLine({ instance: name, status: 'ok', method, filename: fn, size: cl ? +cl : 0 });
                     await writer.write(enc.encode('---STREAM---\n'));
-                    const reader = upstream.body.getReader();
+                    const reader = videoResp.body.getReader();
                     while (true) {
                       const { done, value } = await reader.read();
                       if (done) break;
@@ -466,11 +594,12 @@ export default {
                 } else {
                   const tcpResp = await fetchViaTcp(data.url);
                   if (tcpResp.status === 200 || tcpResp.status === 206) {
-                    let cl = tcpResp.headers['content-length'] || tcpResp.headers['estimated-content-length'];
                     const fn = data.filename || 'video.mp4';
+                    const videoResp = await checkedVideoResponse(tcpResp, fn, tcpResp.status);
+                    const cl = videoResp.headers.get('Content-Length');
                     await sendLine({ instance: name, status: 'ok', method, filename: fn, size: cl ? +cl : 0 });
                     await writer.write(enc.encode('---STREAM---\n'));
-                    const reader = tcpResp.body.getReader();
+                    const reader = videoResp.body.getReader();
                     while (true) {
                       const { done, value } = await reader.read();
                       if (done) break;
@@ -482,6 +611,10 @@ export default {
                   await sendLine({ instance: name, status: 'fail', detail: method + '_' + tcpResp.status });
                 }
               } catch (e) {
+                if (String(e.message || '').startsWith('not_video:')) {
+                  await sendLine({ instance: name, status: 'fail', detail: e.message });
+                  break;
+                }
                 if (attempt === 0) continue;
                 await sendLine({ instance: name, status: 'fail', detail: method + '_err' });
               }
@@ -536,6 +669,8 @@ export default {
         status: 400, headers: { 'Content-Type': 'application/json', ...CORS },
       });
     }
+    const bodyError = validateRequestBody(body);
+    if (bodyError) return jsonResponse({ status: 'error', error: { code: bodyError } }, { status: 400 });
 
     const winner = await getFirstCobaltResult(providers, body, 15000);
     if (winner.data) {

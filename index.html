@@ -214,7 +214,7 @@ textarea,input{-webkit-user-select:text;user-select:text}
     <div id="ok" class="ok hidden">✓ <span id="okTxt"></span></div>
   </div>
 
-  <div class="ft">僅供個人學習使用，請尊重版權 · v22</div>
+  <div class="ft">僅供個人學習使用，請尊重版權 · v24</div>
 </div>
 
 <script>
@@ -229,11 +229,10 @@ const ICON_DATA_URL = 'data:image/svg+xml,' + encodeURIComponent(
 'use strict';
 
 const API_ENDPOINT = 'https://video-api.s0937854008.workers.dev/';
-const PROXY_ENDPOINT = 'https://video-api.s0937854008.workers.dev/proxy?u=';
 const DOWNLOAD_ENDPOINT = 'https://video-api.s0937854008.workers.dev/download';
 const HEALTH_ENDPOINT = 'https://video-api.s0937854008.workers.dev/health';
+const MAX_BROWSER_DOWNLOAD_BYTES = 250 * 1024 * 1024;
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-const proxify = u => PROXY_ENDPOINT + encodeURIComponent(u);
 
 function fetchWithTimeout(url, opts, ms){
   const ctrl = new AbortController();
@@ -421,7 +420,7 @@ async function go(){
 }
 
 function showYTCard(url){
-  const m=url.match(/(?:v=|youtu\.be\/)([\w-]{11})/);
+  const m=url.match(/(?:v=|youtu\.be\/|shorts\/)([\w-]{11})/);
   $('thumb').style.display='none';
   if(m){
     const img=$('thumb');
@@ -499,21 +498,10 @@ async function download(){
   $('btnDl').disabled=true;
   const isYT = /youtube\.com|youtu\.be/.test(state.url);
   if(isYT){
-    isIOS ? await downloadYTWithStatus() : downloadYTDirect();
+    isIOS ? await downloadWithStatus() : downloadYTDirect();
     return;
   }
-  // Instagram: use proxy
-  if(!state.cobaltUrl){
-    $('loading').classList.remove('hidden');
-    $('loadTxt').textContent='取得下載連結…';
-    try{
-      const data = await cobaltFetch({url:state.url, videoQuality:state.quality});
-      $('loading').classList.add('hidden');
-      if(!data.url){showErr('下載連結取得失敗');state.downloading=false;$('btnDl').disabled=false;return;}
-      state.cobaltUrl=data.url;
-    }catch(e){$('loading').classList.add('hidden');showErr('下載失敗：'+e.message);state.downloading=false;$('btnDl').disabled=false;return;}
-  }
-  await streamAndSave(proxify(state.cobaltUrl));
+  await downloadWithStatus();
 }
 
 function indexOfBytes(buf,pat){
@@ -522,8 +510,8 @@ function indexOfBytes(buf,pat){
   return -1;
 }
 
-/* YouTube download with status reporting (binary-safe) */
-async function downloadYTWithStatus(){
+/* Download with status reporting (binary-safe) */
+async function downloadWithStatus(){
   $('ok').classList.add('hidden');
   $('saveActions').classList.add('hidden');
   $('vp').classList.add('hidden');
@@ -535,10 +523,15 @@ async function downloadYTWithStatus(){
   let totalSize=0, filename='video.mp4';
   function parseLine(line){
     if(!line.trim()) return;
-    try{const ev=JSON.parse(line);updateStatusLog(ev);
-      if(ev.status==='ok'){totalSize=ev.size||0;if(ev.filename) filename=ev.filename;}
-      if(ev.status==='error') throw new Error(ev.detail||'all_failed');
-    }catch(e){if(e.message==='all_failed') throw e;}
+    let ev;
+    try{ ev=JSON.parse(line); }catch(_){ return; }
+    updateStatusLog(ev);
+    if(ev.status==='ok'){
+      totalSize=ev.size||0;
+      if(ev.filename) filename=ev.filename;
+      if(totalSize > MAX_BROWSER_DOWNLOAD_BYTES) throw new Error('影片過大，請改用桌面直接下載');
+    }
+    if(ev.status==='error') throw new Error(ev.detail||'all_failed');
   }
 
   try{
@@ -571,6 +564,7 @@ async function downloadYTWithStatus(){
           for(const line of dec.decode(rawBuf.slice(0,di)).split('\n')) parseLine(line);
           const after = rawBuf.slice(di + DELIM.length);
           if(after.length > 0){ chunks.push(after); received += after.length; }
+          if(received > MAX_BROWSER_DOWNLOAD_BYTES) throw new Error('影片過大，請改用桌面直接下載');
           streamStarted = true; rawBuf = null;
           $('progLbl').textContent = '下載中… 0 MB';
         } else {
@@ -584,6 +578,7 @@ async function downloadYTWithStatus(){
       } else {
         chunks.push(value);
         received += value.length;
+        if(received > MAX_BROWSER_DOWNLOAD_BYTES) throw new Error('影片過大，請改用桌面直接下載');
         if(totalSize > 0){
           const pct = Math.min(99, Math.round(received / totalSize * 100));
           $('pb').style.width = pct + '%';
@@ -659,47 +654,6 @@ function downloadYTDirect(){
   $('okTxt').textContent='開始下載中…';
   state.downloading=false;
   $('btnDl').disabled=false;
-}
-
-/* IG / generic stream download */
-async function streamAndSave(url){
-  $('ok').classList.add('hidden');
-  $('saveActions').classList.add('hidden');
-  $('prog').classList.remove('hidden');
-  $('pb').style.width='0%';
-  $('progLbl').textContent='下載影片中…';
-  try{
-    const r = await fetch(url);
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const total = +(r.headers.get('Content-Length')||0);
-    const reader = r.body.getReader();
-    const chunks=[]; let received=0;
-    while(true){
-      const {done,value}=await reader.read();
-      if(done) break;
-      chunks.push(value); received+=value.length;
-      if(total){
-        const pct = Math.min(99, Math.round(received/total*100));
-        $('pb').style.width = pct+'%';
-        $('progLbl').textContent = '下載中… '+pct+'%';
-      } else {
-        $('progLbl').textContent = '下載中… '+(received>>20)+' MB';
-      }
-    }
-    const blob = new Blob(chunks, {type:'video/mp4'});
-    const file = new File([blob], 'video.mp4', {type:'video/mp4'});
-    $('pb').style.width='100%';
-    state.videoFile = file;
-    state.blobUrl = URL.createObjectURL(blob);
-    state.downloading = false;
-    $('btnDl').disabled = false;
-    showDownloadComplete();
-  }catch(e){
-    $('prog').classList.add('hidden');
-    $('btnDl').disabled = false;
-    state.downloading = false;
-    showErr('下載失敗：'+e.message);
-  }
 }
 
 function showDownloadComplete(){

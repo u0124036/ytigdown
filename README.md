@@ -42,6 +42,8 @@ wrangler secret put COBALT_AUTH_HEADER
 Api-Key xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
+目前公開 Cobalt 對 YouTube 常回 `error.api.auth.jwt.missing`、HTTP 400/5xx，不能當主要通道。YouTube 要穩定下載，必須設定可用的 `COBALT_PRIMARY` 與對應授權。
+
 ### 關閉公開備援
 
 如果只想使用自架或授權 instance：
@@ -69,6 +71,12 @@ https://video-api.s0937854008.workers.dev/health
 - `primaryConfigured: true`：代表已設定主下載通道。
 - `providers[].ok: true`：代表該 Cobalt instance 的 `GET /` 可連線。
 - `providers[].services`：確認 instance 支援 `youtube`、`instagram`。
+
+## 安全限制
+
+`/proxy` 不再是公開任意網址代理。前端下載改走 `/download`，Worker 會在串流前檢查內容型態，避免把 Instagram 封面 JPEG 或錯誤文字誤判為 MP4。
+
+如果 `/download` 回 `not_video:image`，代表 Cobalt 回來的是圖片/封面，不是影片。
 
 ## 建議的穩定流程
 
@@ -127,3 +135,10 @@ yt-dlp --cookies cookies.txt "URL"
 - `fetch_403` 或 `tcp_403`：下載來源 CDN 擋 Cloudflare egress，改自架 Cobalt 或本機 yt-dlp。
 - `all_failed`：所有設定的通道都不可用。
 
+## 本機檢查
+
+```sh
+npm test
+```
+
+這會檢查 `worker.js` 語法與 `index.html` 內嵌 script 語法。
