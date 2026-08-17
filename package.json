@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --check worker.js && node scripts/check-inline-scripts.cjs"
+    "test": "node --check worker.js && node scripts/check-inline-scripts.cjs",
+    "bump": "node scripts/bump-version.cjs",
+    "version:check": "node scripts/bump-version.cjs --check",
+    "predeploy": "npm test && npm run bump"
   },
   "devDependencies": {}
 }
